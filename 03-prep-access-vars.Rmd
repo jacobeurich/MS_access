@@ -1,0 +1,2756 @@
+---
+title: "03-prep-access-vars.Rmd"
+author: "Whitney Friedman"
+date: "3/4/2022"
+output:
+  rmdformats::robobook:
+    self_contained: true
+    thumbnails: false
+    lightbox: false
+    gallery: false
+    highlight: tango
+---
+
+# 03-prep-access-vars
+
+This script loads in the clean Kiribati VRS and HEIS datasets and preps data for
+the 'access' manuscript led by Katy Seto and Whitney Friedman.
+
+# Setup
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Load things
+
+```{r message=FALSE, warning=FALSE}
+# Load libraries
+library(here) 
+source(here("MS_access", "00-load-libraries.R"))
+library(corrplot)
+
+# load plot themes
+source(here("MS_access", "00-plot-themes.R"))
+
+# Load datasets
+source(here("MS_access", "00-load-datasets.R"))
+
+# Format tables
+source(here("MS_access", "01-format-tables.R"))
+
+# Identify fishers / fishing households
+source(here("MS_access", "02-identify-fishers.R"))
+```
+
+
+## General stats and plots
+
+```{r}
+# Households surveyed by island_village
+n_hh_surveyed <- hh %>% 
+  select(island_village, interview__key, respondent_id) %>% 
+  distinct(interview__key, .keep_all = T) %>% 
+  group_by(island_village) %>% 
+  summarise(n_resp_hh = n()) %>% 
+  left_join(village_tbl)
+
+n_hh_surveyed %>% 
+  ggplot(aes(x = island_village, y = n_resp_hh, fill = island))+
+  geom_bar(stat = "identity")+
+  ylab("# of households surveyed")+
+  scale_fill_manual(values = island_palette)+
+  theme_gov_dark()
+
+ggsave(here("MS_access","plots","hh_surveys_per_village.png"), height = 7, width = 17)
+
+n_hh_surveyed %>% 
+  ggplot(aes(x = as.factor(n_resp_hh)))+
+  geom_bar(fill = "#440154FF")+
+  ylab("Number of villages")+ xlab("Number of households surveyed")
+
+ggsave(here("MS_access","plots","hh_surveys_per_village_hist.png"), height = 3, width = 5)
+
+# number of individuals surveyed
+id_tbl %>% distinct(respondent_id) %>% nrow()
+# min / max age
+min(id_tbl$age, na.rm = T)
+max(id_tbl$age, na.rm = T)
+
+# number of islands
+hh_tbl %>% distinct(island)
+hh_tbl %>% distinct(island_village)
+```
+
+
+
+# Select and format variables
+
+## R1. Benefits - household consumption
+Amt of consumed seafood *total* (grams) - last 7 days (consumed_seafood_total_grams)
+Amt of consumed seafood *bought* (grams) - last 7 days (consumed_seafood_bought_grams)
+Amt of consumed seafood *exchanged* (grams) - last 7 days (consumed_seafood_exchanged_grams)
+Amt of consumed seafood *produced* (grams) - last 7 days (consumed_seafood_produced_grams)
+Amt of consumed seafood *gifted* (grams) - last 7 days (consumed_seafood_gifted_grams)
+
+h1503a - h1503s
+
+
+### r1:: mean seafood consumption per household
+- Remove seafoods that may not be local or aren't fish/inverts
+- Divide by HH 'AME' (adult male equivalent)  -> weighted mean 
+```{r}
+# list of households that responded to *any* questions in the food recall survey (section 5), for their household
+# n = 2146 / 2182
+h1500_resp <- food_recall %>% 
+  filter(beneficiary == "this household") %>% 
+  distinct(interview__key) %>% 
+  mutate(resp_h1500 = 1)
+
+n_food_resp = nrow(h1500_resp)
+
+# seafood data
+# remove: seafood that may not be local (tinned) or aren't fish/inverts (seaweed)
+h1503 <- food_recall %>%
+  filter(coicop_class == "Fish and sea food",
+         beneficiary == "this household",
+         !coicop %in% c("113023005", "113023015", "Seaweed","Tinned Mackerel","Tinned Tuna")) %>% 
+  select(interview__key, coicop_class, coicop_subclass, coicop, qty_gram_new, type)
+
+# types of seafood
+h1503 %>% tabyl(coicop)
+
+
+# TABLE S1. Table of all possible responses to h1503a, showing the 
+# number of households that responded with at least one 'yes' to eating
+# seafoods within the coicop category indicated (n = 2125)
+food_recall %>%
+  filter(coicop_class == "Fish and sea food",
+         beneficiary == "this household") %>% 
+  select(interview__key, coicop) %>% 
+  mutate(coicop = recode(coicop, 
+                         "113023005" = "Unknown",
+                         "113023015" = "Unknown")) %>% 
+  distinct() %>% 
+  tabyl(coicop) %>%
+  mutate(percent = n / n_food_resp) %>% 
+  arrange(-n)
+
+# Table S4
+# means of acquiring local seafood
+# (n = number of households responding for each *seafood* acq. category)
+h1503 %>% 
+  distinct(interview__key, type) %>% 
+  tabyl(type) %>% 
+  arrange(-n) %>% 
+  mutate(percent = n / n_food_resp) #%>% view()
+
+# h1503 analysis table 'h1503_all'
+# Include all households that responded to the HIES food recall survey.
+# If hh's answered only non-target seafood, or other food types, 
+# set local seafood consumption to 0 (n = 47 hh's)
+h1503_all <- h1500_resp %>% 
+  left_join(h1503) %>% 
+  mutate(qty_gram_new = replace_na(qty_gram_new, 0))
+
+# Check
+# min(h1503$qty_gram_new) # no NA's before join - good
+# min(h1503_all$qty_gram_new) # no NA's now; but 0g is the minimum - good
+
+# Amt of consumed seafood (grams) *all acquisition types - last 7 days (consumed_seafood_total_grams)
+h1503_total <- h1503_all %>% 
+  group_by(interview__key) %>%
+  summarise(consumed_seafood = sum(qty_gram_new, na.rm=T)) 
+
+#Amt of consumed seafood *bought* (grams) - last 7 days (consumed_seafood_bought_grams)
+h1503_bought <- h1503_all %>% 
+  filter(type == "Cash purchased") %>% 
+  group_by(interview__key) %>% 
+  summarise(consumed_seafood_bought = sum(qty_gram_new, na.rm=T))
+
+#Amt of consumed seafood *exchanged* (grams) - last 7 days (consumed_seafood_exchanged_grams)
+h1503_exchanged <- h1503_all %>% 
+  filter(type == "Barter or exchange") %>% 
+  group_by(interview__key) %>% 
+  summarise(consumed_seafood_exchanged = sum(qty_gram_new, na.rm=T))
+
+#Amt of consumed seafood *produced* (grams) - last 7 days (consumed_seafood_produced_grams)
+h1503_produced <- h1503_all %>% 
+  filter(type == "Home production") %>% 
+  group_by(interview__key) %>% 
+  summarise(consumed_seafood_produced = sum(qty_gram_new, na.rm=T))
+
+#Amt of consumed seafood *gifted* (grams) - last 7 days (consumed_seafood_gifted_grams)
+h1503_gifted <- h1503_all %>% 
+  filter(type == "Gift received") %>% 
+  group_by(interview__key) %>% 
+  summarise(consumed_seafood_gifted = sum(qty_gram_new, na.rm=T))
+
+
+benefits_hh <- hh_ame[c("interview__key","ame_sum")] %>%
+  left_join(h1500_resp, by = "interview__key") %>% 
+  left_join(h1503_total[c("interview__key", "consumed_seafood")]) %>% 
+  left_join(h1503_bought[c("interview__key","consumed_seafood_bought")]) %>% 
+  left_join(h1503_exchanged[c("interview__key","consumed_seafood_exchanged")]) %>% 
+  left_join(h1503_produced[c("interview__key","consumed_seafood_produced")]) %>% 
+  left_join(h1503_gifted[c("interview__key","consumed_seafood_gifted")]) %>% 
+  filter(resp_h1500 == 1) %>% 
+  mutate(across(starts_with("consumed_seafood"), ~replace_na(., 0))) %>% 
+  mutate(consumed_seafood_ame = consumed_seafood/ame_sum,
+         consumed_seafood_bought_ame = consumed_seafood_bought/ame_sum, 
+         consumed_seafood_exchanged_ame = consumed_seafood_exchanged/ame_sum, 
+         consumed_seafood_produced_ame = consumed_seafood_produced/ame_sum, 
+         consumed_seafood_gifted_ame = consumed_seafood_gifted/ame_sum) %>% 
+  mutate(consumed_seafood_bought_pr = consumed_seafood_bought/consumed_seafood,
+         consumed_seafood_exchanged_pr = consumed_seafood_exchanged/consumed_seafood,
+         consumed_seafood_produced_pr = consumed_seafood_produced/consumed_seafood,
+         consumed_seafood_gifted_pr = consumed_seafood_gifted/consumed_seafood)
+
+benefits_hh #%>% view() # 2146 hh's
+```
+
+Plots of hh_ame, proportion seafood consumed
+```{r}
+# Plot: mean: consumed seafood, by household, summarized at village level
+benefits_hh %>% 
+  left_join(hh_tbl) %>% 
+  ggplot(aes(x = island_village, y = consumed_seafood_ame, colour = island))+
+  geom_boxplot()+
+  scale_colour_manual(values = island_palette)+
+  theme_gov_dark()
+
+ggsave(here("MS_access","plots","benefits_consumed_seafood_ame.png"), 
+       height = 7, width = 17)
+
+```
+
+
+
+### r1:: quartiles
+Determine (high / low seafood consumption hh) based on quartiles of seafood_consumed_ame
+```{r}
+
+# get quartiles of households that USE each acquisition method (na.rm=T)
+# 17 hh's with 0's. Leave in.
+qt_total <- benefits_hh %>% 
+  pull(consumed_seafood_ame) %>% 
+  quantile(., na.rm=T)
+
+# These are zero-inflated. Remove 0's.
+# None of these are in use.
+qt_bought <- benefits_hh %>%
+  filter(consumed_seafood_bought_ame > 0) %>%   
+  pull(consumed_seafood_bought_ame) %>% 
+  quantile(., na.rm=T)
+
+qt_exchanged <- benefits_hh %>% 
+  filter(consumed_seafood_exchanged_ame > 0) %>% 
+  pull(consumed_seafood_exchanged_ame) %>% 
+  quantile(., na.rm=T)
+
+qt_gifted <- benefits_hh %>% 
+  filter(consumed_seafood_gifted_ame > 0) %>% 
+  pull(consumed_seafood_gifted_ame) %>% 
+  quantile(., na.rm=T)
+
+qt_produced <- benefits_hh %>% 
+  filter(consumed_seafood_produced_ame > 0) %>% 
+  pull(consumed_seafood_produced_ame) %>% 
+  quantile(., na.rm=T)
+
+# score households as high, mid, low based on consumption category
+
+benefits_hh_qt <- benefits_hh %>% 
+  #mutate(across(contains("_ame"), ~na_if(., 0))) %>% 
+  mutate(consumed_seafood_qt = case_when(is.na(consumed_seafood_ame) ~ NA_character_,
+                                         consumed_seafood_ame <= qt_total[[2]] ~ "low", 
+                                         consumed_seafood_ame >= qt_total[[4]] ~ "high",
+                                         TRUE ~ "mid"),
+         consumed_seafood_bought_qt = case_when(is.na(consumed_seafood_bought_ame) ~ NA_character_,
+                                               consumed_seafood_bought_ame <= qt_bought[[2]] ~ "low", 
+                                                consumed_seafood_bought_ame >= qt_bought[[4]] ~ "high",
+                                              TRUE ~ "mid"),
+         consumed_seafood_exchanged_qt = case_when(is.na(consumed_seafood_exchanged_ame) ~ NA_character_, 
+                                                  consumed_seafood_exchanged_ame <= qt_exchanged[[2]] ~ "low", 
+                                                  consumed_seafood_exchanged_ame >= qt_exchanged[[4]] ~ "high",
+                                                  TRUE ~ "mid"),
+         consumed_seafood_produced_qt = case_when(is.na(consumed_seafood_produced_ame) ~ NA_character_,
+                                                 consumed_seafood_produced_ame <= qt_produced[[2]] ~ "low",
+                                                 consumed_seafood_produced_ame >= qt_produced[[4]] ~ "high",
+                                                 TRUE ~ "mid"),
+         consumed_seafood_gifted_qt = case_when(is.na(consumed_seafood_gifted_ame) ~ NA_character_, 
+                                               consumed_seafood_gifted_ame <= qt_gifted[[2]] ~ "low",
+                                               consumed_seafood_gifted_ame >= qt_gifted[[4]] ~ "high",
+                                               TRUE ~ "mid")) %>% 
+  mutate(across(contains("_qt"), ~factor(.,ordered = T, levels = c(NA_character_,"low","mid","high")))) %>% 
+  mutate(across(contains("_ame"), ~replace_na(., 0)))
+
+# Total number of non-zero high/mid/low households
+benefits_hh_qt %>% 
+  tabyl(consumed_seafood_qt) %>% 
+  adorn_totals()
+
+benefits_hh_qt %>% 
+  tabyl(consumed_seafood_bought_qt) %>% 
+  adorn_totals()
+
+benefits_hh_qt %>% 
+  tabyl(consumed_seafood_exchanged_qt) %>% 
+  adorn_totals()
+
+benefits_hh_qt %>% 
+  tabyl(consumed_seafood_gifted_qt) %>% 
+  adorn_totals()
+
+benefits_hh_qt %>% 
+  tabyl(consumed_seafood_produced_qt) %>% 
+  adorn_totals()
+
+```
+
+Plots of consumed seafood categories (hh level)
+```{r}
+# BOXPLOTS --- 
+# distributions of high, medium, low seafood consumption households ~ mean
+# total
+benefits_hh_qt %>% 
+  left_join(hh_tbl) %>% 
+  ggplot(aes(y = island_village, x = consumed_seafood_ame, colour = island))+
+  geom_boxplot()+
+  facet_wrap(~consumed_seafood_qt)+
+  theme(axis.text.x = element_text(size = 7))
+
+ggsave(here("MS_access","plots","benefits_consumed_seafood_qt.png"), 
+       height = 10, width = 10)
+
+# bought
+benefits_hh_qt %>% 
+  left_join(hh_tbl) %>% 
+  ggplot(aes(y = island_village, x = consumed_seafood_bought_ame, colour = island))+
+  geom_boxplot()+
+  facet_wrap(~consumed_seafood_bought_qt)+
+  theme(axis.text.x = element_text(size = 7))
+
+ggsave(here("MS_access","plots","benefits_consumed_seafood_bought_qt.png"), 
+       height = 10, width = 10)
+
+# exchanged
+benefits_hh_qt %>% 
+  left_join(hh_tbl) %>% 
+  ggplot(aes(y = island_village, x = consumed_seafood_exchanged_ame, colour = island))+
+  geom_boxplot()+
+  facet_wrap(~consumed_seafood_exchanged_qt)+
+  theme(axis.text.x = element_text(size = 7))
+
+ggsave(here("MS_access","plots","benefits_consumed_seafood_exchanged_qt.png"), 
+       height = 10, width = 10)
+
+# produced
+benefits_hh_qt %>% 
+  left_join(hh_tbl) %>% 
+  ggplot(aes(y = island_village, x = consumed_seafood_produced_ame, colour = island))+
+  geom_boxplot()+
+  facet_wrap(~consumed_seafood_produced_qt)+
+  theme(axis.text.x = element_text(size = 7))
+
+ggsave(here("MS_access","plots","benefits_consumed_seafood_produced_qt.png"), 
+       height = 10, width = 10)
+
+# gifted
+benefits_hh_qt %>% 
+  left_join(hh_tbl) %>% 
+  ggplot(aes(y = island_village, x = consumed_seafood_gifted_ame, colour = island))+
+  geom_boxplot()+
+  facet_wrap(~consumed_seafood_gifted_qt)+
+  theme(axis.text.x = element_text(size = 7))
+
+ggsave(here("MS_access","plots","benefits_consumed_seafood_gifted_qt.png"), 
+       height = 10, width = 10)
+
+
+
+# BAR PLOTS ---
+# FIGURE 2
+# number of households in 'high', 'medium', and 'low' seafood consumption per village ---
+# total seafood 
+hh_tbl %>% 
+  left_join(benefits_hh_qt) %>% 
+  group_by(island_village, consumed_seafood_qt) %>% 
+  summarise(n_households = n()) %>% 
+  left_join(village_tbl) %>% 
+  ggplot(aes(y = n_households, x = reorder(island_village, vlg_order), fill = consumed_seafood_qt))+
+  geom_bar(stat = "identity")+
+  scale_fill_manual(values = c("cornflowerblue","grey70","purple"), na.value = "grey20", 
+                    labels = c("low", "mid", "high","unknown"))+
+  theme(axis.text.x = element_text(size = 7,angle = 90, vjust = 0.5, hjust=1), 
+        axis.title.x=element_blank(),
+        legend.position = "bottom") +
+    facet_grid(cols = vars(region), scales = "free_x", space = "free_x")
+
+
+ggsave(here("MS_access","plots","benefits_consumed_seafood_qt_hh.png"), 
+       height = 5, width = 12)
+
+
+```
+
+More plots!
+```{r}
+
+# bought seafood 
+benefits_hh_qt %>% 
+  left_join(hh_tbl) %>% 
+  group_by(island_village, consumed_seafood_bought_qt) %>% 
+  summarise(n_households = n()) %>% 
+  filter(consumed_seafood_bought_qt != "mid") %>% 
+  ggplot(aes(y = n_households, x = island_village, fill = consumed_seafood_bought_qt))+
+  geom_bar(stat = "identity")+
+  scale_fill_manual(values = c("cornflowerblue","purple"))+
+  theme(axis.text.x = element_text(size = 7,angle = 90, vjust = 0.5, hjust=1), 
+        axis.title.x=element_blank(),
+        legend.position = "bottom")
+
+ggsave(here("MS_access","plots","benefits_consumed_seafood_bought_qt_hh.png"), 
+       height = 5, width = 12)
+
+# exchanged seafood 
+benefits_hh_qt %>% 
+  left_join(hh_tbl) %>% 
+  group_by(island_village, consumed_seafood_exchanged_qt) %>% 
+  summarise(n_households = n()) %>% 
+  filter(consumed_seafood_exchanged_qt != "mid") %>% 
+  ggplot(aes(y = n_households, x = island_village, fill = consumed_seafood_exchanged_qt))+
+  geom_bar(stat = "identity")+
+  scale_fill_manual(values = c("cornflowerblue","purple"))+
+  theme(axis.text.x = element_text(size = 7,angle = 90, vjust = 0.5, hjust=1), 
+        axis.title.x=element_blank(),
+        legend.position = "bottom")
+
+
+ggsave(here("MS_access","plots","benefits_consumed_seafood_exchanged_qt_hh.png"), 
+       height = 5, width = 12)
+
+# produced seafood 
+benefits_hh_qt %>% 
+  left_join(hh_tbl) %>% 
+  group_by(island_village, consumed_seafood_produced_qt) %>% 
+  summarise(n_households = n()) %>% 
+  filter(consumed_seafood_produced_qt != "mid") %>% 
+  ggplot(aes(y = n_households, x = island_village, fill = consumed_seafood_produced_qt))+
+  geom_bar(stat = "identity")+
+  scale_fill_manual(values = c("cornflowerblue","purple"))+
+  theme(axis.text.x = element_text(size = 7,angle = 90, vjust = 0.5, hjust=1), 
+        axis.title.x=element_blank(),
+        legend.position = "bottom")
+
+ggsave(here("MS_access","plots","benefits_consumed_seafood_produced_qt_hh.png"), 
+       height = 5, width = 12)
+
+# gifted seafood 
+benefits_hh_qt %>% 
+  left_join(hh_tbl) %>% 
+  group_by(island_village, consumed_seafood_gifted_qt) %>% 
+  summarise(n_households = n()) %>% 
+  filter(consumed_seafood_gifted_qt != "mid") %>% 
+  ggplot(aes(y = n_households, x = island_village, fill = consumed_seafood_gifted_qt))+
+  geom_bar(stat = "identity")+
+  scale_fill_manual(values = c("cornflowerblue","purple"))+
+  theme(axis.text.x = element_text(size = 7,angle = 90, vjust = 0.5, hjust=1), 
+        axis.title.x=element_blank(),
+        legend.position = "bottom")
+
+ggsave(here("MS_access","plots","benefits_consumed_seafood_gifted_qt_hh.png"), 
+       height = 5, width = 12)
+
+```
+
+Tables of consumed seafood high / mid / low categories
+```{r}
+# Table: number of households in 'high', 'medium', and 'low' seafood consumption per village
+# TOTAL
+benefits_hh_qt %>% 
+  left_join(hh_tbl) %>% 
+  group_by(island_village, consumed_seafood_qt) %>% 
+  summarise(n_households = n()) %>% 
+  pivot_wider(names_from = consumed_seafood_qt, values_from = n_households) %>% 
+  ungroup() %>% 
+  mutate(across(c(high, low, mid), ~replace_na(., 0))) %>% 
+  arrange(island_village) %>% 
+  kbl(caption = "hh consumption category: all acquistion types") %>%
+  kable_styling(full_width = F)
+
+# BOUGHT
+benefits_hh_qt %>% 
+  left_join(hh_tbl) %>% 
+  group_by(island_village, consumed_seafood_bought_qt) %>% 
+  summarise(n_households = n()) %>% 
+  pivot_wider(names_from = consumed_seafood_bought_qt, values_from = n_households) %>% 
+  ungroup() %>% 
+  mutate(across(c(high, low, mid), ~replace_na(., 0))) %>% 
+  arrange(island_village) %>% 
+  kbl(caption = "hh consumption category: bought") %>%
+  kable_styling(full_width = F)
+
+# EXCHANGED
+benefits_hh_qt %>% 
+  left_join(hh_tbl) %>% 
+  group_by(island_village, consumed_seafood_exchanged_qt) %>% 
+  summarise(n_households = n()) %>% 
+  pivot_wider(names_from = consumed_seafood_exchanged_qt, values_from = n_households) %>% 
+  ungroup() %>% 
+  mutate(across(c(high, low), ~replace_na(., 0))) %>% 
+  arrange(island_village) %>% 
+  kbl(caption = "hh consumption category: exchanged") %>%
+  kable_styling(full_width = F)
+
+# PRODUCED
+benefits_hh_qt %>% 
+  left_join(hh_tbl) %>% 
+  group_by(island_village, consumed_seafood_produced_qt) %>% 
+  summarise(n_households = n()) %>% 
+  pivot_wider(names_from = consumed_seafood_produced_qt, values_from = n_households) %>% 
+  ungroup() %>% 
+  mutate(across(c(high, low, mid), ~replace_na(., 0))) %>% 
+  arrange(island_village) %>% 
+  kbl(caption = "hh consumption category: produced") %>%
+  kable_styling(full_width = F)
+
+# GIFTED
+benefits_hh_qt %>% 
+  left_join(hh_tbl) %>% 
+  group_by(island_village, consumed_seafood_gifted_qt) %>% 
+  summarise(n_households = n()) %>% 
+  pivot_wider(names_from = consumed_seafood_gifted_qt, values_from = n_households) %>% 
+  ungroup() %>% 
+  mutate(across(c(high, low, mid), ~replace_na(., 0))) %>% 
+  arrange(island_village) %>% 
+  kbl(caption = "hh consumption category: gifted") %>%
+  kable_styling(full_width = F)
+
+```
+
+
+ 
+## A1. Access to technology
+Access to harvest gear needed for inshore / offshore fishing
+903 - methods used; 906a - transportation used; 916-921 - gear used
+
+(P901. In the last 7 days, did %hmName% engage in fishing, hunting, or seafood collection?)
+P903. In the last 7 days, what were the *3 main* fishing, hunting or seafood collection methods did %hmName% use?
+(P906. In the last 7 days, which location did %hmName% go when he was using the %rostertitle% method?)
+P906a. In the last 7 days, what method of transportation did %hmName% use when he was using the %rostertitle% method?
+P916. In the last 12 months, how much (in AUD) did %hmName% pay for spearguns?
+P917. In the last 12 months, how much (in AUD) did %hmName% pay for fishing rods & reels?
+P918. In the last 12 months, how much (in AUD) did %hmName% pay for fishing wheels?
+P919. In the last 12 months, how much (in AUD) did %hmName% pay for wetsuits?
+P920. In the last 12 months, how much (in AUD) did %hmName% pay for ammunitions?
+P921. In the last 12 months, how much (in AUD) did %hmName% pay for other main fishing equipment?
+P921n. What was the other main fishing equipment?
+
+
+NOTE: Think more about this indicator, and use of p903 answers. Probably makes 
+more sense for "access" to use p916-921
+
+
+```{r}
+# a1_tech ---
+# summary table; less processed than a1_gears and a1_transportation
+
+a1_tech <- hh %>% select(interview__key, respondent_id, island_village, 
+                       matches("p901|p903|p906|p916|p917|p918|p919|p920|p921")) %>% 
+  filter(p901 == "Yes") %>% 
+  rename("p903__1_net_beach_seine_gill_cast" = p903__1, 
+         "p903__2_handline" = p903__2, 
+         "p903__3_trolling_jigging_deepwaterline"  = p903__3, 
+         "p903__4_spearfishing_night"  = p903__4, 
+         "p903__5_spearfishing_day"  = p903__5, 
+         "p903__6_gleaning_collecting" = p903__6,
+         "p903__7_traps" = p903__7, 
+         "p903__8_shooting_slingshot_gun" = p903__8, # SHOULD BE ZERO. 
+         "p903__9_freediving"  = p903__9, 
+         "p903__10_scuba"  = p903__10,
+         "p903__11_other"  = p903__11) %>% 
+  mutate(a1_gearused_sum = rowSums(across(starts_with("p903_")),na.rm=T)) # NOTE: this includes "other"
+
+
+a1_tech
+a1_tech %>% tabyl(a1_gearused_sum)
+
+# what is 'other'?
+a1_tech %>% tabyl(p903n)
+
+
+# a1_tech by household
+# get max (0,1); if gear is used at all within household == 1, otherise = 0
+a1_tech_hh <- a1_tech %>% 
+  select(interview__key, respondent_id, starts_with("p903__")) %>% 
+  pivot_longer(cols = starts_with("p903_")) %>% 
+  group_by(interview__key, name) %>% 
+  summarise(max_val = max(value, na.rm=F)) %>% 
+  pivot_wider(names_from = "name", values_from = "max_val") %>% 
+  select(-p903__11_other)
+
+```
+
+### a1:: transportation
+P906a. In the last 7 days, what method of transportation did %hmName% use when he was using the %rostertitle% method?
+```{r}
+# a1_transportation_other ---
+
+# What is 'other'? (includes: bicycle, boats, walking...)
+a1_tech %>% 
+  select(matches("p906n")) # %>% view
+
+# Recode 'other' to combine as needed
+# %>% discard(~all(is.na(.) | . ==""))
+# bwennarina= paddle; booti = boat;  kaibetia = floats on fishing nets and lines; ito = driftwood
+a1_transportation_oth <- a1_tech %>% 
+  select(respondent_id, matches("p906n")) %>% 
+  discard(~all(is.na(.) | . =="")) %>%  # discard empty columns; only 3 remain
+  rename("p906n__1_net_beach_seine_gill_cast" = p906n__1, 
+         "p906n__2_handline" = p906n__2, 
+         "p906n__3_trolling_jigging_deepwaterline"  = p906n__3) %>% 
+  unite(p906n_other,matches("p906n"), sep = ";", remove = F, na.rm = T) %>%
+  mutate(p906n_other = na_if(p906n_other, "")) %>%
+  drop_na(p906n_other) %>% 
+  mutate(p906n_other_recode = case_when((str_detect(tolower(p906n_other), "motor|engine") & 
+                                         !str_detect(tolower(p906n_other), "motorcycle")) ~ "oth_boat_with_motor", 
+                                      str_detect(tolower(p906n_other), "boat|booti|canoe|paddle") ~ "oth_boat_or_canoe", 
+                                      str_detect(tolower(p906n_other), "walk|foot") ~ "oth_walk",
+                                      str_detect(tolower(p906n_other), "bicycle") ~ "oth_bicycle",
+                                      str_detect(tolower(p906n_other), "motorcycle|truck") ~ "oth_vehicle",
+                                      TRUE ~ NA_character_))
+
+a1_transportation_oth %>% tabyl(p906n_other)
+a1_transportation_oth %>% tabyl(p906n_other_recode)
+# a1_transportation_oth %>% view() # check
+
+# a1_transportation --- 
+# Table by respondent_id, for each respondent who went fishing. 
+# Per respondent, tech used, across any 'methods used'
+# '1' for any tech used, '0' if tech was not used
+a1_transportation <- a1_tech %>% 
+  select(respondent_id, matches("p906a")) %>% 
+  left_join(a1_transportation_oth[c("respondent_id","p906n_other_recode")]) %>% 
+  rename("p906a__1_net_beach_seine_gill_cast" = p906a__1, 
+         "p906a__2_handline" = p906a__2, 
+         "p906a__3_trolling_jigging_deepwaterline"  = p906a__3, 
+         "p906a__4_spearfishing_night"  = p906a__4, 
+         "p906a__5_spearfishing_day"  = p906a__5, 
+         "p906a__6_gleaning_collecting" = p906a__6,
+         "p906a__7_traps" = p906a__7, 
+         "p906a__9_freediving"  = p906a__9, 
+         "p906a__10_scuba"  = p906a__10,
+         "p906a__11_other"  = p906a__11) %>% 
+  select(-p906a__11_other) %>% # can drop this now that its joined with 'other' table
+  pivot_longer(cols = starts_with("p906"), values_to = "tech_used") %>% 
+  drop_na(tech_used) %>% 
+  select(respondent_id, tech_used) %>% 
+  distinct() %>% 
+  mutate(dummy_var = 1) %>% 
+  pivot_wider(names_from = tech_used, values_from = dummy_var) %>% 
+  clean_names() %>% 
+  select(-other_method_note) %>% 
+  mutate(a1_transportation_sum = rowSums(across(-respondent_id),na.rm=T)) %>%  # NOTE! this includes "other" and "no boat" categories
+  # get value of 'highest tech' used; simplify categories
+  mutate(a1_transportation_used = case_when(large_skiff_with_outboard_motor == 1 ~ "Boat with motor", 
+                                            wooden_canoe_with_outboard_motor == 1 ~ "Boat with motor", 
+                                            oth_boat_with_motor == 1 ~ "Boat with motor",
+                                            traditional_canoe_with_sail_or_paddle == 1 ~ "Canoe or boat (no motor)", 
+                                            oth_boat_or_canoe == 1 ~ "Canoe or boat (no motor)", 
+                                            TRUE ~ "No boat"))
+
+
+#a1_transportation %>% get_dupes(respondent_id) # check (none; good)
+
+a1_transportation
+a1_transportation %>% tabyl(a1_transportation_used)
+
+# transportation by household: 
+a1_transport_hh <- a1_transportation %>% 
+  left_join(hh[c("interview__key","respondent_id")]) %>% 
+  select(-starts_with("a1_"), -no_boat) %>% 
+  pivot_longer(cols = c(-interview__key, -respondent_id), names_to = "var") %>% 
+  mutate(prefix = "p906_") %>% 
+  unite("var", c(prefix,var)) %>% 
+  mutate(value = replace_na(value, 0)) %>% 
+  group_by(interview__key, var) %>% 
+  summarise(max_val = max(value, na.rm=T)) %>% 
+  ungroup() %>% 
+  pivot_wider(names_from = "var", values_from = "max_val")
+  
+a1_transport_hh
+```
+
+### a1:: household gear rank
+- Rank a1_tech and a1_transportation as low (1), mid (2), or high (3) tech gears
+- Based on cost to access?
+- NOTE: if we combine transportation with gear; we may 'double count' some methods (like trolling, jigging, deep water)
+
+*Gear rankings*
+2 = Net (beach seine, gill, cast) 
+1 = Handline (drop stone, pole fishing, rod & reel)
+3 = Trolling, jigging or deep water line fishing *(req's boat w motor? count just once)
+2 = Spearfishing night
+2 = Spearfishing day
+1 = Gleaning / Collecting
+2 = Traps
+2 = Shooting (hunting with slingshot, gun)
+1 = Freediving / diving without SCUBA
+3 = Diving with SCUBA 
+? = Other (note) - NO SCORE AT THE MOMENT! REVIEW. Not sure if there will be repeats with asked cat's or not.
+
+*Transportation rankings*
+3 = Boat with motor
+2 = Canoe or boat (no motor)
+0 = No boat
+
+```{r}
+#a1_tech %>% names() %>% sort()
+#a1_transportation %>% tabyl(a1_transportation_used)
+
+a1_tech_rank <- a1_tech %>% 
+  select(interview__key, respondent_id, island_village, starts_with("p903__")) %>% 
+  pivot_longer(cols = starts_with("p903__"), names_to = "tech_name", values_to = "tech_used") %>% 
+  filter(tech_used  == 1) %>% 
+  mutate(tech_rank = case_when(str_detect(tech_name, "1_net_beach_seine") ~ 2, 
+                               str_detect(tech_name, "2_handline") ~ 1, 
+                               str_detect(tech_name, "3_trolling") ~ 3, 
+                               str_detect(tech_name, "4_spearfishing_night") ~ 2, 
+                               str_detect(tech_name, "5_spearfishing_day") ~ 2, 
+                               str_detect(tech_name, "6_gleaning_") ~ 1, 
+                               str_detect(tech_name, "7_traps") ~ 2, 
+                               str_detect(tech_name, "8_shooting_") ~ 2,
+                               str_detect(tech_name, "9_freediving") ~ 1,
+                               str_detect(tech_name, "10_scuba") ~ 3,
+                               TRUE ~ NA_real_)) %>%
+  select(interview__key, respondent_id, tech_name, tech_used, tech_rank) %>% 
+  # one entry per unique gear; per household
+  distinct(interview__key, tech_name, .keep_all = T) %>% 
+  # sum all tech_ranks per household
+  group_by(interview__key) %>% 
+  summarise(tech_rank_sum = sum(tech_rank, na.rm = T)) %>% 
+  ungroup()
+
+#a1_tech_rank$tech_rank_sum %>% hist()
+
+
+a1_transport_rank <- a1_transportation %>% 
+  select(respondent_id, a1_transportation_used) %>% 
+  mutate(transport_rank = case_when(a1_transportation_used == "No boat" ~ 0, 
+                                    str_detect(a1_transportation_used, "no motor") ~ 2, 
+                                    a1_transportation_used == "Boat with motor" ~ 3, 
+                                    TRUE ~ NA_real_)) %>% 
+  # one entry per unique transport; per household
+  left_join(hh[c("interview__key","respondent_id")]) %>% 
+  distinct(interview__key, a1_transportation_used, .keep_all = T) %>% 
+  # sum all transport_ranks per household
+  group_by(interview__key) %>% 
+  summarise(transport_rank_sum = sum(transport_rank, na.rm = T)) %>% 
+  ungroup()
+  
+#a1_transport_rank$transport_rank_sum %>% hist()
+
+a1_gear_rank <- hh_tbl %>% 
+  left_join(a1_tech_rank) %>% 
+  left_join(a1_transport_rank) %>% 
+  mutate(across(c(tech_rank_sum, transport_rank_sum), ~replace_na(., 0))) %>% 
+  mutate(a1_gear_rank_sum = rowSums(across(c(tech_rank_sum, transport_rank_sum), na.rm=T)))
+  
+a1_gear_rank
+
+#a1_gear_rank$a1_gear_rank_sum %>% hist()
+
+# Plot --- 
+a1_gear_rank %>% 
+  mutate(a1_gear_rank_sum = factor(a1_gear_rank_sum, levels = seq(0,12), ordered = T)) %>% 
+  group_by(island_village, a1_gear_rank_sum) %>% 
+  summarise(n_hh = n()) %>% 
+  ggplot(aes(x= island_village, y = n_hh, fill = a1_gear_rank_sum))+
+  geom_bar(stat = "identity")+
+  ylab("# hh surveys")+
+  scale_fill_manual(values = island_palette)+
+  theme_gov_dark()
+
+ggsave(here("MS_access","plots","a1_gear_rank_sum_hh.png"), height = 7, width = 17)
+
+
+```
+
+### a1:: village resources
+VRS4_1. Do you have the following FISHING assets in the village?
+Categories: 1:Wood canoes, 2:Fibreglass boats, 3:Outboard Motors, 4:Eskies/portable coolers, 
+5:Freezers (electric or propane), 6:Ice machines, 7:Fishing Nets (purse), 8:Fishing Nets (gillnet), 9:Spearguns, 10:Fishing Lines, 11:Drag Nets, 12:Harpoons/Spears, 13:Active Fish Traps, 1
+4:Underwater flashlights, 15:SCUBA diving equipment, 16:FAD (Fish Aggregating Device), 17:Other Fishing Equipment (note)
+```{r}
+a1_vtech <- vrs %>% 
+  select(interview__key, island_village, starts_with('fish_asset_list')) %>% 
+  rename(vlg_canoes = fish_asset_list__1, 
+         vlg_fiberglass_boats = fish_asset_list__2, 
+         vlg_outboard_motors = fish_asset_list__3, 
+         vlg_portable_coolers = fish_asset_list__4,
+         vlg_freezers = fish_asset_list__5, 
+         vlg_ice_machines = fish_asset_list__6, 
+         vlg_fishing_nets_purse = fish_asset_list__7,
+         vlg_fishing_nets_gillnet = fish_asset_list__8,
+         vlg_spearguns = fish_asset_list__9,
+         vlg_fishing_lines = fish_asset_list__10,
+         vlg_drag_nets = fish_asset_list__11,
+         vlg_harpoons_spears = fish_asset_list__12,
+         vlg_activefishtraps_weirs = fish_asset_list__13,
+         vlg_underwaterflashlights = fish_asset_list__14,
+         vlg_scuba = fish_asset_list__15,
+         vlg_fad = fish_asset_list__16) %>% 
+  select(-fish_asset_list__17)
+         
+# Make sure there's just one line of responses per village
+# For any village with multiple contrasting responses, take the highest level reported.
+a1_vtech <- a1_vtech %>% 
+  filter(!is.na(island_village)) %>% 
+  pivot_longer(cols = -c(interview__key, island_village)) %>% 
+  arrange(-value) %>% 
+  select(-interview__key) %>% 
+  distinct(island_village, name, .keep_all = T) %>% 
+  pivot_wider(names_from = "name", values_from = "value")
+
+# CHECK: one village (north_tarawa_tearinibai) with all 0's for village fish assets
+vrs %>% filter(island_village == "north_tarawa_tearinibai") %>% t() #%>% view()
+
+# plot village assets
+a1_vtech %>%
+  select(-starts_with("a1_vlg_")) %>% 
+  left_join(village_tbl) %>% 
+  pivot_longer(cols = -c(island_village, island), names_to = "asset") %>% 
+  ggplot(aes(x = island_village, y = asset, size = factor(value), colour = island))+
+  geom_point()+
+  scale_colour_manual(values = island_palette)+
+  theme_gov_dark()+ylab("")+xlab("")
+
+ggsave(here("MS_access","plots","a1_village_tech.png"), height = 7, width = 17)
+
+```
+
+### a1:: village gear rank
+
+*Village gear ranks*
+2 = Canoe or boat (combine!)
+3 = Outboard motors
+1 = Portable coolers
+1 = Fishing lines
+2 = Nets: drag, gillnet, purse (combine!)
+2 = Harpoons / spears / spearguns (combine!)
+1 = Underwater flashlights
+3 = Scuba
+3 = Freezers
+3 = Ice machines
+2 = FAD
+2 = Active fish traps (weirs)
+
+
+```{r}
+a1_vtech_rank <- a1_vtech %>% 
+  mutate(vlg_boats_no_motor = if_else((vlg_canoes == 1 | 
+                                         vlg_fiberglass_boats == 1), 1, 0), 
+         vlg_nets = if_else((vlg_drag_nets == 1 | vlg_fishing_nets_gillnet == 1 | 
+                               vlg_fishing_nets_purse == 1), 1, 0), 
+         vlg_spearguns_etc = if_else((vlg_spearguns == 1 | vlg_harpoons_spears == 1), 1, 0)) %>% 
+  select(-c(vlg_canoes, vlg_fiberglass_boats, vlg_drag_nets, vlg_fishing_nets_gillnet, 
+            vlg_fishing_nets_purse, vlg_spearguns, vlg_harpoons_spears)) %>% 
+  pivot_longer(cols = -island_village, names_to = "tech_name", values_to = "tech_used") %>% 
+  filter(tech_used == 1) %>% 
+  mutate(tech_rank = case_when(str_detect(tech_name, "vlg_boats_no_motor") ~ 2,
+                               str_detect(tech_name, "vlg_outboard_motors") ~ 3, 
+                               str_detect(tech_name, "vlg_portable_coolers") ~ 1, 
+                               str_detect(tech_name, "vlg_fishing_lines") ~ 1, 
+                               str_detect(tech_name, "vlg_activefishtraps_weirs") ~ 2, 
+                               str_detect(tech_name, "vlg_underwaterflashlights") ~ 1, 
+                               str_detect(tech_name, "vlg_scuba") ~ 3, 
+                               str_detect(tech_name, "vlg_freezers") ~ 3, 
+                               str_detect(tech_name, "vlg_ice_machines") ~ 3,
+                               str_detect(tech_name, "vlg_fad") ~ 2,
+                               str_detect(tech_name, "vlg_nets") ~ 2,
+                               str_detect(tech_name, "vlg_spearguns_etc") ~ 2,
+                               TRUE ~ NA_real_)) %>%
+  # sum all tech_ranks per village
+  group_by(island_village) %>% 
+  summarise(
+    a1_vtech_sum = sum(tech_used, na.rm=T),
+    a1_vtech_rank_sum = sum(tech_rank, na.rm = T)) %>% 
+  ungroup()
+
+hist(a1_vtech_rank$a1_vtech_sum)
+hist(a1_vtech_rank$a1_vtech_rank_sum)
+```
+
+### a1:: hh+vlg gear rank *
+```{r}
+a1_tech_new <-
+  a1_gear_rank %>% 
+  left_join(a1_vtech_rank, by = "island_village") %>% 
+  mutate(a1_vtech_rank_sum_wt = a1_vtech_rank_sum * 0.5) %>% 
+  mutate(a1_tech_score = rowSums(across(c(a1_gear_rank_sum, a1_vtech_rank_sum_wt), na.rm=F)))
+
+# check villages with "NA" scores
+a1_tech_new %>% 
+  filter(is.na(a1_tech_score)) %>% 
+  tabyl(island_village)
+
+# plot
+a1_tech_new %>% 
+  ggplot(aes(x = island_village, y = a1_tech_score, fill = island))+
+  geom_boxplot()+
+  scale_fill_manual(values = island_palette)+
+  theme_gov_dark()
+
+ggsave(here("MS_access","plots","a1_tech_score.png"), height = 7, width = 17)
+
+hist(a1_tech_new$a1_gear_rank_sum)
+hist(a1_tech_new$a1_vtech_rank_sum_wt)
+hist(a1_tech_new$a1_tech_score)
+
+skim(a1_tech_new)
+```
+
+
+
+## A2. Access to capital
+
+### a2::MSL
+MSL Assets --
+
+Note: Want to ensure this isn't just discerning (or embedding) an urban/rural divide. 
+MSL should be "accumulated material wealth" not contingent on urban things like having 
+access to plumbed water
+
+
+Questions: 
+h1102 - roof material (convert to binary; thatched or “stronger than thatched”; remove “other”)  
+      - look at distribution; how many other/NA.
+
+h1119 - toilet facility (check distribution)
+
+1201 - Assets
+  - Beds or mattresses (0/1)
+  - Water tank 
+  - Refrigerator 
+  - Freezer    
+  - Cooking infrastructure: (check distribution; can you have LPG in rural?; otherwise do 0/1 have any
+    of these , have none): Electric stove, Gas stove (LPG), Kerosene stove, Gas burner (Butane),            Microwave oven
+  - Air conditioner
+  - Generator 
+
+13b1 - vehicle ownership
+  - Car, mini-van, pick-up truck or suv 
+  - Motorbike or scooter
+  - Bicycle                
+  - Boat with an in-board motor                
+  - A canoe or a boat built to equip an outboard motor
+  - Outboard motor
+
+P505. Does %hmName% own a working cell/mobile phone? (yes/no)
+- Summarize: anyone in household
+
+H1801 (which) /1802 (how many) - livestock / aquaculture assets
+- Pigs
+- Chicken
+- Ducks
+- Milkfish
+
+subset: h1102, h1119, h1201, h13b1
+```{r}
+# h1102, h1119, h1201, h13b1 (household level; 1 response per hh; section 9)
+# H1102. What is the main material used for the this housing unit's roof?
+msl_qs <- hies_long %>% 
+  filter(str_detect(question_id, c("h1102|h1119|h1201|h13b1"))) %>% 
+  select(-hm_basic__id) %>% 
+  pivot_wider(id_cols = interview__key, names_from = question_id, values_from = value)
+
+msl_qs
+```
+
+summarise/format: h1102
+0 = thatched(1119) or no roof (2)
+1 = galvanised / aluminum/ tin,(1005), concrete (2), fiberglass (4), 
+    wood/wood shillings(41), masonite/plywood (9)
+```{r}
+# check: 1 unique observation per household - yes
+# length(unique(h1102q$interview__key)) == nrow(h1102q)
+# NOTE: the two 'other' responses are 'no wall'. Set 'other' to ZERO (all HH's represented)
+# NOTE: all households are represented here. 
+# sum(h1102q$interview__key %in% hh_tbl$interview__key)
+
+h1102q <- msl_qs %>% 
+  select(interview__key, h1102) %>% 
+  mutate(msl_hard_roofing = case_when(h1102 == 'Thatched roofing' ~ 0,
+                                         h1102 == 'Other material (note)' ~ 0, 
+                                         TRUE ~ 1))
+# Summary: 
+h1102q %>% tabyl(msl_hard_roofing)
+h1102q %>% tabyl(h1102, msl_hard_roofing)
+
+h1102q %>% 
+  left_join(hh_tbl) %>% 
+  group_by(island_village, msl_hard_roofing) %>% 
+  summarise(n_households = n()) %>% 
+  ggplot(aes(y = n_households, x = island_village, fill = as.factor(msl_hard_roofing)))+
+  geom_bar(stat = "identity")+
+  scale_fill_manual(values = c("cornflowerblue","purple"))+
+  theme_gov_dark()
+```
+
+
+h1119
+0 = no toilet (956)
+1 = any toilet facility (bucket, pit latrine, flush) (1232)
+```{r}
+msl_qs %>% 
+  select(interview__key, h1119) %>% 
+  tabyl(h1119)
+
+h1119q <- msl_qs %>% 
+  select(interview__key, h1119) %>% 
+  mutate(msl_toilet_facility = case_when(h1119 == 'No facility' ~ 0,
+                                         TRUE ~ 1))
+
+h1119q %>% tabyl(msl_toilet_facility)
+
+h1119q %>% 
+  left_join(hh_tbl) %>% 
+  group_by(island_village, msl_toilet_facility) %>% 
+  summarise(n_households = n()) %>% 
+  ggplot(aes(y = n_households, x = island_village, fill = as.factor(msl_toilet_facility)))+
+  geom_bar(stat = "identity")+
+  scale_fill_manual(values = c("cornflowerblue","purple"))+
+  theme_gov_dark()
+```
+
+H1201. Does any member of this household OWN
+OUT RIGHT any of the following household assets?
+Please note that it has to be in good working
+conditions.
+
+Responses h1201__1 to h1201__39
+
+
+Categories: 
+1:Lounge furniture (couches and tables), 2:Dining tables, 
+3:Beds or mattresses, 4:Cabinet or dressers, 5:Other furniture (note), 
+6: Water tank, 7:Refrigerator, 8:Freezer, 9:Electric stove, 10:Gas stove (LPG), 
+11:Kerosene stove, 12:Gas burner (Butane), 13:Microwave oven, 
+14:Washing machine, clothes dryer, 15:Air conditioner, 16:Generator, 
+17:Rooftop solar power, 18:Water heater, 19:Water pump, 
+20:Other major appliances (note), 21:Rice cooker, 23:Toaster, 24:Sewing machine, 
+25:Electric fan, 26:Other small electrical appliances (note), 
+27:Television (TV), 28:Radio, 29:DVD / Blu Ray player, 30:Stereo / home cinema, 
+31:Game consoles (PlayStation, Nintendo, Xbox, PSP, DS, etc), 
+32:Photo equipment (cameras - still/video), 33:Computer desktop, 
+34:Printer, scanner, 35:Lawn mower, 36:Chainsaw or brush cutter, 
+37:Other motorised garden tool (note), 38:Power drill, sander, 39:Other assets (note)
+
+Focus Qs: 
+3: Beds or mattresses
+6: Water tank
+7: Refrigerator 
+8: Freezer
+15: Air conditioner
+16: Generator
+28: Radio
+
+Cooking infrastructure: (check distribution; can you have LPG in rural?; otherwise do 0/1 have any of these, have none)
+9:  Electric stove
+10: Gas stove (LPG)
+11: Kerosene stove
+12: Gas burner (Butane)
+13: Microwave oven
+
+
+NOTE: 324 HH's did not answer this question
+
+```{r}
+h1201q <- msl_qs %>% 
+  select(interview__key, matches("h1201")) %>%
+  rename(msl_beds = h1201__3,
+         msl_watertank = h1201__6, 
+         msl_refrigerator = h1201__7,
+         msl_freezer = h1201__8, 
+         msl_cooking_electric = h1201__9, 
+         msl_cooking_lpg = h1201__10, 
+         msl_cooking_kerosene = h1201__11, 
+         msl_cooking_butane = h1201__12, 
+         msl_cooking_microwave = h1201__13, 
+         msl_airconditioner = h1201__15,
+         msl_generator = h1201__16,
+         msl_radio = h1201__28) %>% 
+  select(interview__key, matches("msl_")) %>% 
+  drop_na(msl_beds) %>% # dropping the 324 hh's that didn't answer h1201
+  mutate(across(starts_with("msl_"), ~as.numeric(.x))) %>% 
+  mutate(msl_cooking_sum = rowSums(across(starts_with("msl_cooking")), na.rm=T)) %>% 
+  mutate(msl_cooking_infrastructure = if_else(msl_cooking_sum == 0, 0, 1))
+
+h1201q %>% tabyl(msl_cooking_infrastructure)
+h1201q %>% tabyl(msl_cooking_lpg)
+h1201q %>% tabyl(msl_refrigerator)
+h1201q %>% tabyl(msl_radio) # 663 / 1858
+
+# PLOTS 
+# check: can you have LPG in rural? (yes, although minimally)
+h1201q %>% 
+  left_join(hh_tbl) %>% 
+  group_by(island_village, msl_cooking_lpg) %>% 
+  summarise(n_households = n()) %>% 
+  ggplot(aes(y = n_households, x = island_village, fill = as.factor(msl_cooking_lpg)))+
+  geom_bar(stat = "identity")+
+  scale_fill_manual(values = c("cornflowerblue","purple"))+
+  theme_gov_dark()
+
+# beds
+h1201q %>% 
+  left_join(hh_tbl) %>% 
+  group_by(island_village, msl_beds) %>% 
+  summarise(n_households = n()) %>% 
+  ggplot(aes(y = n_households, x = island_village, fill = as.factor(msl_beds)))+
+  geom_bar(stat = "identity")+
+  scale_fill_manual(values = c("cornflowerblue","purple"))+
+  theme_gov_dark()
+
+# water tank
+h1201q %>% 
+  left_join(hh_tbl) %>% 
+  group_by(island_village, msl_watertank) %>% 
+  summarise(n_households = n()) %>% 
+  ggplot(aes(y = n_households, x = island_village, fill = as.factor(msl_watertank)))+
+  geom_bar(stat = "identity")+
+  scale_fill_manual(values = c("cornflowerblue","purple"))+
+  theme_gov_dark()
+
+# refrigerator
+h1201q %>% 
+  left_join(hh_tbl) %>% 
+  group_by(island_village, msl_refrigerator) %>% 
+  summarise(n_households = n()) %>% 
+  ggplot(aes(y = n_households, x = island_village, fill = as.factor(msl_refrigerator)))+
+  geom_bar(stat = "identity")+
+  scale_fill_manual(values = c("cornflowerblue","purple"))+
+  theme_gov_dark()
+
+# freezer
+h1201q %>% 
+  left_join(hh_tbl) %>% 
+  group_by(island_village, msl_freezer) %>% 
+  summarise(n_households = n()) %>% 
+  ggplot(aes(y = n_households, x = island_village, fill = as.factor(msl_freezer)))+
+  geom_bar(stat = "identity")+
+  scale_fill_manual(values = c("cornflowerblue","purple"))+
+  theme_gov_dark()
+
+# cooking infrastructure
+h1201q %>% 
+  left_join(hh_tbl) %>% 
+  group_by(island_village, msl_cooking_infrastructure) %>% 
+  summarise(n_households = n()) %>% 
+  ggplot(aes(y = n_households, x = island_village, fill = as.factor(msl_cooking_infrastructure)))+
+  geom_bar(stat = "identity")+
+  scale_fill_manual(values = c("cornflowerblue","purple"))+
+  theme_gov_dark()
+
+# air conditioner
+h1201q %>% 
+  left_join(hh_tbl) %>% 
+  group_by(island_village, msl_airconditioner) %>% 
+  summarise(n_households = n()) %>% 
+  ggplot(aes(y = n_households, x = island_village, fill = as.factor(msl_airconditioner)))+
+  geom_bar(stat = "identity")+
+  scale_fill_manual(values = c("cornflowerblue","purple"))+
+  theme_gov_dark()
+
+# generator
+h1201q %>% 
+  left_join(hh_tbl) %>% 
+  group_by(island_village, msl_generator) %>% 
+  summarise(n_households = n()) %>% 
+  ggplot(aes(y = n_households, x = island_village, fill = as.factor(msl_generator)))+
+  geom_bar(stat = "identity")+
+  scale_fill_manual(values = c("cornflowerblue","purple"))+
+  theme_gov_dark()
+
+# radio
+h1201q %>% 
+  left_join(hh_tbl) %>% 
+  group_by(island_village, msl_radio) %>% 
+  summarise(n_households = n()) %>% 
+  ggplot(aes(y = n_households, x = island_village, fill = as.factor(msl_radio)))+
+  geom_bar(stat = "identity")+
+  scale_fill_manual(values = c("cornflowerblue","purple"))+
+  theme_gov_dark()
+
+```
+
+H13b1. Does any member of this household own
+any of the following vehicles? (yes/no)
+
+
+01/ Car, mini-van, pick-up truck or suv *
+02/ Large truck, bus or passenger van
+03/ Motorbike or scooter *
+04/ Bicycle *
+05/ Boat with an in-board motor *
+06/ A canoe or a boat built to equip an outboard motor * 
+07/ Outboard motor * 
+08/ Cart
+09/ Other vehicle (note)
+
+* focal question
+
+```{r}
+h13b1q <- msl_qs %>% select(interview__key, matches("h13b1_")) %>% 
+  rename(msl_cartrucksuv = h13b1__1,
+         msl_motorbike = h13b1__3, 
+         msl_bicycle = h13b1__4,
+         msl_boat_with_motor = h13b1__5,
+         msl_boat_no_motor = h13b1__6,
+         msl_outboard_motor = h13b1__7) %>% 
+  select(interview__key, matches("msl_")) %>% 
+  drop_na(msl_cartrucksuv) # drop 775 households that didn't respond
+  
+h13b1q %>% skim() # check all are 
+
+# Plots
+#car/truck/suv
+h13b1q %>% 
+  left_join(hh_tbl) %>% 
+  group_by(island_village, msl_cartrucksuv) %>% 
+  summarise(n_households = n()) %>% 
+  ggplot(aes(y = n_households, x = island_village, fill = msl_cartrucksuv))+
+  geom_bar(stat = "identity")+
+  scale_fill_manual(values = c("cornflowerblue","purple"))+
+  theme_gov_dark()
+
+# motorbike/scooter
+h13b1q %>% 
+  left_join(hh_tbl) %>% 
+  group_by(island_village, msl_motorbike) %>% 
+  summarise(n_households = n()) %>% 
+  ggplot(aes(y = n_households, x = island_village, fill = msl_motorbike))+
+  geom_bar(stat = "identity")+
+  scale_fill_manual(values = c("cornflowerblue","purple"))+
+  theme_gov_dark()
+
+# bicycle
+h13b1q %>% 
+  left_join(hh_tbl) %>% 
+  group_by(island_village, msl_bicycle) %>% 
+  summarise(n_households = n()) %>% 
+  ggplot(aes(y = n_households, x = island_village, fill = msl_bicycle))+
+  geom_bar(stat = "identity")+
+  scale_fill_manual(values = c("cornflowerblue","purple"))+
+  theme_gov_dark()
+
+# boat with motor
+h13b1q %>% 
+  left_join(hh_tbl) %>% 
+  group_by(island_village, msl_boat_with_motor) %>% 
+  summarise(n_households = n()) %>% 
+  ggplot(aes(y = n_households, x = island_village, fill = msl_boat_with_motor))+
+  geom_bar(stat = "identity")+
+  scale_fill_manual(values = c("cornflowerblue","purple"))+
+  theme_gov_dark()
+
+# msl_boat_no_motor
+h13b1q %>% 
+  left_join(hh_tbl) %>% 
+  group_by(island_village, msl_boat_no_motor) %>% 
+  summarise(n_households = n()) %>% 
+  ggplot(aes(y = n_households, x = island_village, fill = msl_boat_no_motor))+
+  geom_bar(stat = "identity")+
+  scale_fill_manual(values = c("cornflowerblue","purple"))+
+  theme_gov_dark()
+
+# msl_outboard_motor
+h13b1q %>% 
+  left_join(hh_tbl) %>% 
+  group_by(island_village, msl_outboard_motor) %>% 
+  summarise(n_households = n()) %>% 
+  ggplot(aes(y = n_households, x = island_village, fill = msl_outboard_motor))+
+  geom_bar(stat = "identity")+
+  scale_fill_manual(values = c("cornflowerblue","purple"))+
+  theme_gov_dark()
+
+```
+
+
+P505. Does %hmName% own a working cell/mobile phone? (yes/no)
+- This question was asked to multiple respondents / hh :. 
+- msl_cellphone = 1 if *any member* of the household answered YES (otherwise; 0)
+
+
+```{r}
+# P505. Does %hmName% own a working cell/mobile phone? (yes/no)
+# p505: by household this table contains *only* hh's with at least 1 response. 
+# and shows, per hh, if at least 1 respondent answered "yes" for "has cellphone" 
+
+p505q <- hh %>% select(interview__key, respondent_id, p505) %>% 
+  filter(!is.na(p505)) %>% # remove NA's
+  mutate(p505_bin = if_else(p505 == "Yes", 1, 0)) %>%
+  group_by(interview__key) %>% 
+  summarise(p505_sum = sum(p505_bin, na.rm = T)) %>% 
+  mutate(msl_cellphone = if_else(p505_sum > 0, 1, 0)) %>% 
+  select(-p505_sum)
+
+p505q %>% tabyl(msl_cellphone)
+
+# plot
+p505q %>% 
+  left_join(hh_tbl) %>% 
+  group_by(island_village, msl_cellphone) %>% 
+  summarise(n_households = n()) %>% 
+  ggplot(aes(y = n_households, x = island_village, fill = factor(msl_cellphone)))+
+  geom_bar(stat = "identity")+
+  scale_fill_manual(values = c("cornflowerblue","purple"))+
+  theme_gov_dark()
+```
+
+H1801: Does any member of this household have any of the following livestock or aquaculture stocks?
+
+1/ Pigs * 
+2/ Chicken * 
+3/ Ducks * 
+4/ Other livestock (note)
+5/ Prawn
+6/ Clam
+7/ Seaweed * 
+8/ Milkfish * 
+9/ Oyster or pearls
+10/ Coral
+11/ Other (note)
+
+* focal question
+
+```{r}
+# H1801: Does any member of this household have any of the following livestock or aquaculture stocks?
+# H1802. How many %rostertitle% does this household own? (don't need)
+h1801q <- hies_long %>% 
+  filter(str_detect(question_id, c("h1801"))) %>% 
+  select(-hm_basic__id) %>% 
+  pivot_wider(id_cols = interview__key, names_from = question_id, values_from = value) %>% 
+  rename(msl_pigs = h1801__1,
+         msl_chicken = h1801__2, 
+         msl_ducks = h1801__3,
+         msl_seaweed = h1801__7,
+         msl_milkfish = h1801__8) %>% 
+  select(interview__key, matches("msl_")) 
+
+h1801q %>% skim() # check for NA's etc.
+
+h1801q %>% tabyl(msl_pigs) # almost everyone owns pigs!
+h1801q %>% tabyl(msl_chicken)
+h1801q %>% tabyl(msl_seaweed) # no one; drop
+h1801q %>% tabyl(msl_milkfish) # only 2 hh; drop
+
+# PLOTS
+# pigs
+h1801q %>% 
+  left_join(hh_tbl) %>% 
+  group_by(island_village, msl_pigs) %>% 
+  summarise(n_households = n()) %>% 
+  ggplot(aes(y = n_households, x = island_village, fill = factor(msl_pigs)))+
+  geom_bar(stat = "identity")+
+  scale_fill_manual(values = c("cornflowerblue","purple"))+
+  theme_gov_dark()
+
+# chicken
+h1801q %>% 
+  left_join(hh_tbl) %>% 
+  group_by(island_village, msl_chicken) %>% 
+  summarise(n_households = n()) %>% 
+  ggplot(aes(y = n_households, x = island_village, fill = factor(msl_chicken)))+
+  geom_bar(stat = "identity")+
+  scale_fill_manual(values = c("cornflowerblue","purple"))+
+  theme_gov_dark()
+
+# ducks
+h1801q %>% 
+  left_join(hh_tbl) %>% 
+  group_by(island_village, msl_ducks) %>% 
+  summarise(n_households = n()) %>% 
+  ggplot(aes(y = n_households, x = island_village, fill = factor(msl_ducks)))+
+  geom_bar(stat = "identity")+
+  scale_fill_manual(values = c("cornflowerblue","purple"))+
+  theme_gov_dark()
+
+```
+
+
+### a2::Household expenditures
+From Mike Sharp 
+- Given the HIES is a consumption survey, we recommend you use total household consumption to rank households.
+- That is total annual household consumption expenditure:
+- annual$exp if consumptiontype==1
+```{r}
+# What is this? 
+#hies_expenditure$annual_exp
+#hies_income$annual_exp # not sure why this is in both tables
+#hies_income$annual_inc
+#var_labels %>%
+#  filter(col.names  == "annual_exp")
+#var_labels %>%
+#  filter(col.names  == "annual_inc")
+
+a2_expenditure <- hies_expenditure %>% 
+  filter(consumptiontype == "Consumption expenditure") %>% 
+  select(interview__key, consumptiontype, coicop_class, coicop_subclass, annual_exp) %>% 
+  group_by(interview__key) %>% 
+  summarise(annual_exp_aud = sum(annual_exp))
+
+a2_expenditure
+
+# summary plot
+a2_expenditure %>% 
+  left_join(hh_tbl) %>% 
+  ggplot(aes(x = island_village, y = annual_exp_aud, colour = island))+
+  geom_boxplot()+
+  scale_colour_manual(values = island_palette)+
+  theme_gov_dark()
+
+ggsave(here("MS_access","plots","a2_annual_expenditures.png"), 
+       height = 7, width = 17)
+
+# summary tables
+
+hies_expenditure %>% 
+  filter(consumptiontype == "Consumption expenditure") %>% 
+  select(interview__key, consumptiontype, coicop_class, coicop_division, annual_exp) %>% 
+  tabyl(coicop_division) #%>% view()
+
+hies_expenditure %>% 
+  filter(consumptiontype == "Consumption expenditure") %>% 
+  select(interview__key, consumptiontype, coicop_class, coicop_division, annual_exp) %>% 
+  group_by(coicop_division) %>% 
+  summarise(annual_exp_aud = sum(annual_exp)) #%>% view()
+
+msl_p1 <- hies_expenditure %>% 
+  filter(consumptiontype == "Consumption expenditure") %>% 
+  select(interview__key, consumptiontype, coicop_class, coicop_division, annual_exp) %>% 
+  group_by(coicop_division) %>% 
+  summarise(annual_exp_aud = sum(annual_exp)) %>% 
+  ggplot(aes(y = reorder(coicop_division,annual_exp_aud), x = annual_exp_aud))+
+  geom_bar(stat = "identity")+ylab("")+xlab("total spending (AUD), all households")+
+  theme_bw()
+
+plot(msl_p1)
+```
+
+
+### a2::Combine all MSL assets
+
+```{r}
+# h1102q, h1119q, h1201q, h13b1q, p505q, h1801q
+a2_msl_assets <- hh_tbl %>% 
+  left_join(a2_expenditure) %>% 
+  left_join(h1102q) %>% 
+  left_join(h1119q) %>% 
+  left_join(h1201q) %>% 
+  #left_join(h13b1q) %>% #REMOVE too many NA
+  left_join(p505q) %>% 
+  left_join(h1801q) %>% 
+  select(interview__key, annual_exp_aud, starts_with("msl_")) %>% 
+  select(-c(msl_cooking_butane, msl_cooking_electric, msl_cooking_kerosene, 
+            msl_cooking_lpg, msl_cooking_microwave, msl_cooking_sum, 
+            msl_seaweed, msl_milkfish, msl_airconditioner, msl_pigs, 
+            msl_ducks, msl_chicken)) %>% 
+  mutate(across(starts_with("msl_"), ~as.numeric(.x)))
+
+# make sure all assets are same data type (across ... factor/numeric)
+a2_msl_assets %>% skim()
+
+```
+
+### a2:: Develop MSL indicator (PCA)
+
+PCA
+
+Key Refs: 
+- UNICEF / MICS "Multiple Indicator Cluster Surveys Data Processing Workshop" (see PDF)
+- [pcaMethods::bpca](https://www.rdocumentation.org/packages/pcaMethods/versions/1.64.0)
+
+Calculate PCA and save results
+Note: have 301-324 hh's with missing data. (324 hh's didn't respond to h1201)
+- Use a PCA method that accounts for this (ppca)
+
+```{r}
+library(pcaMethods) # ppca
+set.seed(1986)
+
+# Correlations among MSL indicators
+a2_msl_assets %>% 
+  select(-interview__key) %>%
+  cor(use = "pairwise.complete.obs", method = "pearson") %>% 
+  corrplot(method = "color", addCoef.col = 'black', diag = F, tl.cex = .5, number.cex = 0.5)
+
+# NEW (leave in hh's with missing MSL data) ----
+
+msl_matrix <- a2_msl_assets %>% 
+  column_to_rownames(var = "interview__key") %>% 
+  select(-annual_exp_aud) %>% 
+  as.matrix()
+
+# PPCA: Probabilistic PCA which is applicable also on data with missing values. Missing value estimation is typically better than NIPALS but also slower to compute and uses more memory. A port to R of the implementation by Jakob Verbeek.
+msl_ppca <- pca(msl_matrix, scale = c("none"), center = F, method = "ppca", nPcs = 2)
+
+msl_ppca
+
+# Results table: 
+msl_pc <- a2_msl_assets %>% 
+  bind_cols(tibble(PC1 = scores(msl_ppca)[,1]))
+
+msl_pc
+
+# Plot correlations between PC1 and MSL variables
+msl_pc %>% 
+  select(-interview__key) %>% 
+  cor(use = "pairwise.complete.obs", method = "spearman") %>% 
+  corrplot(method = "color", addCoef.col = 'black', diag = F, tl.cex = .5, number.cex = 0.5)
+
+```
+
+
+### a2: Final MSL indicator
+a2_msl$PC1_exp
+
+We tested 3 different MSL indicators: 
+“PC1_pos” is the PC1 axis score (variance explained r2 = 0.644) from a PCA developed with *just* the MSL indicators. It is correlated with annual household expenditures (‘annual_exp_aud’) with Pearson’s r2 = 0.47. 
+“PC1_exp” is PC1_pos * log1p(annual_exp_aud). It scales the PC1 score by annual expenditure; and is therefore more correlated with annual_exp (Pearson’s r2 = 0.56)
+“PC1_v2” is the result of a second PCA, in which log1p(annual_exp_aud) was included in addition to the MSL indicators. PC1_v2 is correlated with annual_exp_aud at 0.90. 
+
+We chose PC1_exp because it incorporates both short and long term indicators of household capital. PC1_v2 was excluded because it washed out the effect of the MSL indicators, which we think are an important indicators of long term capital wealth.
+
+```{r}
+# NOTE PC1 is flipped!
+a2_msl <- msl_pc %>% 
+  mutate(PC1_exp = PC1*log1p(annual_exp_aud))
+
+a2_msl$PC1 %>% hist()
+a2_msl$PC1_exp %>% hist()
+
+a2_msl %>% 
+  select(PC1, PC1_exp, annual_exp_aud) %>% 
+  cor(method = "pearson", use = "pairwise.complete.obs")
+  
+# summary plots
+# PC1_pos
+a2_msl %>% 
+  left_join(hh_tbl) %>% 
+  ggplot(aes(x = island_village, y = PC1, colour = island))+
+  geom_boxplot()+
+  scale_colour_manual(values = island_palette)+
+  theme_gov_dark()
+
+ggsave(here("MS_access","plots","a2_pc1.png"), 
+       height = 7, width = 17)
+
+# PC1_exp 
+a2_msl %>%
+  left_join(hh_tbl) %>% 
+  ggplot(aes(x = island_village, y = PC1_exp, colour = island))+
+  geom_boxplot()+
+  scale_colour_manual(values = island_palette)+
+  theme_gov_dark()
+
+ggsave(here("MS_access","plots","a2_pc1_exp.png"), 
+       height = 7, width = 17)
+
+# Final correlations
+png(here("MS_access", "plots", "a2_msl_correlations.png"), 
+    height = 6, width =10, units = "in", res = 300)
+
+a2_msl %>% 
+  select(PC1, PC1_exp, annual_exp_aud, starts_with("msl_")) %>% 
+  cor(use = "pairwise.complete.obs", method = "spearman") %>% 
+  corrplot(method = "color", addCoef.col = 'black', diag = F, tl.cex = .5, number.cex = 0.5)
+
+dev.off()
+
+# MSL indicator summaries (for Table S2)
+
+a2_msl_summary <- a2_msl %>% 
+  select(interview__key, starts_with("msl_")) %>% 
+  pivot_longer(cols = -c(interview__key), names_to = "msl_var") %>%
+  drop_na(value) %>% 
+  group_by(msl_var) %>% 
+  summarise(sum_yes = sum(value, na.rm = T), 
+            sum_answered = n(), 
+            pct_yes = sum_yes / sum_answered)
+
+a2_msl_summary
+
+msl_p2 <- a2_msl_summary %>% 
+  ggplot(aes(x = pct_yes, y = reorder(msl_var, pct_yes)))+
+  geom_bar(stat = "identity")+ xlim(0,.8)+
+  ylab("") + xlab("% of responding households with asset")+
+  theme_bw()
+
+plot(msl_p2)
+
+png(here("MS_access","plots","a2_summaryfig.png"), 
+    height = 5, width = 12, units = "in", res = 300)
+ggpubr::ggarrange(msl_p1, msl_p2, nrow = 1, labels = c("A","B"), widths = c(0.6, 0.4))
+dev.off()
+```
+
+## A3. Access to markets
+
+### a3:: food bought OR exchanged*
+- Proportion of *all* food BOUGHT or EXCHANGED / TOTAL
+- consumed_food_bought(g) +  exchanged(g) / consumed_food_total (g); consumed_food_total = bought + exchanged + gifted + produced
+all food
+
+```{r}
+h1500_all <- food_recall %>%
+  filter(beneficiary == "this household")
+
+# check: all food types (not just seafood) - yes
+h1500_all %>% tabyl(coicop)
+h1500_all %>% tabyl(type)
+
+# TABLE S2.
+# Table showing # of households that responded at least one 'yes' to 
+# each of the coicop classes. Percent is # / households that responded with at least one 
+#'e.g. 'yes' (responded to the food recall q's) (n = 2146)
+
+h1500_all %>% 
+  select(interview__key,coicop_class) %>% 
+  distinct() %>% 
+  tabyl(coicop_class) %>% 
+  mutate(percent = n / n_food_resp) #%>% view()
+  
+
+# Amt of consumed seafood (grams) *all acquisition types - last 7 days (consumed_seafood_total_grams)
+# 'mean' (total / ame_sum)
+allfood_tot <- h1500_all %>% 
+  group_by(interview__key) %>%
+  summarise(allfood_total = sum(qty_gram_new, na.rm=T))
+
+#Amt of consumed seafood *bought* OR *exchanged* (grams) - last 7 days (consumed_seafood_bought_grams)
+allfood_bgt_exch <- h1500_all %>% 
+  filter(type %in% c("Cash purchased","Barter or exchange")) %>% 
+  group_by(interview__key) %>% 
+  summarise(allfood_bought_exchanged = sum(qty_gram_new, na.rm=T))
+
+a3_access <- allfood_tot %>% 
+  left_join(allfood_bgt_exch) %>% 
+  mutate(allfood_bought_exchanged = replace_na(allfood_bought_exchanged, 0)) %>% 
+  mutate(a3_marketaccess = allfood_bought_exchanged/allfood_total)
+
+a3_access
+
+a3_access %>% 
+  left_join(hh_tbl) %>% 
+  ggplot(aes(x = island_village, y = a3_marketaccess, colour = island))+
+  geom_boxplot()+
+  scale_colour_manual(values = island_palette)+
+  theme_gov_dark()
+
+ggsave(here("MS_access","plots","a3_marketaccess.png"), height = 7, width = 17)
+
+a3_access$a3_marketaccess %>% hist()
+```
+
+
+## A4. Access to labor & labor opportunities
+Fishing effort (hours). Hours individual spent fishing (a4_labor_ind) + est_hours paid labor (a4_hours_paid). (Did you go fishing or pay someone else to go? )
+
+901-902 hours pp; 907 - hours per trip per method; 914 - $ spent on labor last 7d
+
+For respondents who *went fishing in the last 7 days* (p901 == 'yes'), 
+- how many hours did they spend fishing OR pay someone else to fish. 
+P901. In the last 7 days, did %hmName% engage in fishing, hunting, or seafood collection?
+
+P902. In the last 7 days, how many *hours* did %hmName% spend in *total* on fishing, hunting, or seafood collection during the last week?
+P907. In the last 7 days, how many *hours* did %hmName% spend using the %rostertitle% method?
+- *hopefully  sum(p907 vars) == p902.
+
+P907a. In the last 7 days, how many fishing *trips* did %hmName% undertake using the %rostertitle% method?
+- NOT USING: P908. How many hours does %hmName% usually use for a typical trip while engaging in the %rostertitle% method?
+
+P914. In the last 7 days, how much (in AUD) did %hmName% pay for labour/help?
+
+
+### a4::individual labor
+```{r}
+# From Jacob 3/3/2022:
+# Butaritari, Onotoa: $10/day for the boat drivers wages [all AUD] ~8-10hrs
+# Abaiang, N Tarawa and S Tarawa: $30-40/day for the boat drivers wages
+# Those are fishers we were taking ‘off the job’.But.. I don’t think a “hired fisher” is very common in Kiribati? 
+# In most situations they are not paid and instead wages comes from catch sales. Maybe we can chat about this more??
+# $1-$4/hr depending on location. Choose $2/hr for now.
+
+hourly_wage_est = 2 # AUD/hr
+
+a4_labor <- hh %>% select(interview__key, respondent_id, island, island_village, 
+                       matches("p901|p902|p907|p914")) %>% 
+  filter(p901 == "Yes") %>% 
+  select(-p901) %>% 
+  mutate(a4_hrs_total = p902, 
+         a4_hrs_sum = rowSums(across(matches("p907__")), na.rm=T), 
+         a4_trips = rowSums(across(matches("p907a__")), na.rm=T), 
+         a4_labor_paid = p914, 
+         a4_labor_hrs_est = p914/hourly_wage_est, 
+         a4_hrs_resp_or_hired = rowSums(across(matches("a4_hrs_total|a4_labor_hrs_est")), na.rm=T))
+
+a4_labor
+
+# Totals don't match. Choose 1. (probably use the simpler of the 2; labor_hrs_total (p902))
+plot(a4_labor$a4_hrs_total, a4_labor$a4_hrs_sum)
+#a4_labor$a4_hrs_resp_or_hired
+
+# only 4 respondents reported hiring labor. won't matter too much at the village level; 
+# though changes things for those 4 household scores.
+a4_labor %>% filter(a4_labor_hrs_est > 0) %>% 
+  select(respondent_id, starts_with("a4_"))
+
+
+# plots ---
+a4_labor %>% 
+  ggplot(aes(x = island_village, y = a4_hrs_total, colour = island))+
+  geom_boxplot()+
+  scale_colour_manual(values = island_palette)+
+  ggtitle("Hrs respondent spent fishing, last 7d")+
+  theme_gov_dark()
+
+ggsave(here("MS_access","plots","a4_hrs_total.png"), 
+       height = 7, width = 17)
+
+a4_labor %>% 
+  ggplot(aes(x = island_village, y = a4_hrs_resp_or_hired, colour = island))+
+  geom_boxplot()+
+  scale_colour_manual(values = island_palette)+
+  ggtitle("Hrs respondent spent fishing OR hired labor, last 7d")+
+  theme_gov_dark()
+
+ggsave(here("MS_access","plots","a4_hrs_resp_or_hired.png"), 
+       height = 7, width = 17)
+
+
+```
+
+### a4::household labor
+
+```{r}
+# adult is anyone >= 15 (based on labor stats)
+# Legal working age in Kiribati: 15-64 (ILL; international labor org)
+a4_labor_hh <- a4_labor %>% 
+  select(interview__key, respondent_id, a4_hrs_total, a4_hrs_resp_or_hired) %>% 
+  left_join(hh_ageclass) %>% 
+  group_by(interview__key) %>% 
+  summarise(a4_hrs_tot_hh = sum(a4_hrs_total, na.rm=T),
+            a4_hrs_tot_hh_or_hired = sum(a4_hrs_resp_or_hired, na.rm=T),
+            a4_hrs_mean_hh = a4_hrs_tot_hh/n_adults) %>% 
+  distinct()
+  
+
+a4_labor_hh
+
+# plot
+
+a4_labor_hh %>% 
+  left_join(hh_tbl) %>% 
+  ggplot(aes(x = island_village, y = a4_hrs_tot_hh_or_hired, colour = island))+
+  geom_boxplot()+
+  scale_colour_manual(values = island_palette)+
+  ggtitle("Total Hours *ALL HH respondents* spent fishing OR hired labor, last 7d")+
+  theme_gov_dark()
+
+ggsave(here("MS_access","plots","a4_hrs_resp_or_hired_hh.png"), 
+       height = 7, width = 18)
+
+
+# number of hh's that paid for labor
+a4_labor_hh %>% 
+  mutate(a4_labor_hrs = a4_hrs_tot_hh_or_hired-a4_hrs_tot_hh) %>% 
+  filter(a4_labor_hrs > 0)
+```
+
+
+## A5. Access to knowledge
+Access to fish based on knowledge
+
+### a5:: fishing identity metric
+score: 
+4: professional household (household contains a 'professional' fisher)
+1-3 : quantile of TOTAL fishing hours per household (low, mid, high)
+0: no fishing reported
+
+
+```{r} 
+# 4 - professional household
+# 46 'professional fishers'; 5 hh's with 2 prof. fishers; 41 professional fish hh's.
+profish_hh <- fisher_tbl %>% 
+  filter(fisher_category == "professional") %>% # get_dupes(interview__key, fisher_category) # check
+  distinct(interview__key, fisher_category) %>% 
+  rename(professional_fisher = fisher_category)
+
+# 0: no fishing reported
+nofish_hh <- fisher_tbl %>% 
+  # drop hh's where no fishing was reported
+  drop_na(fisher_category) %>%  
+  group_by(interview__key, fisher_category) %>% 
+  summarise(n_cat = n()) %>% 
+  pivot_wider(names_from = "fisher_category", values_from = "n_cat") %>% 
+  mutate(fished = rowSums(across(c(casual, professional)), na.rm = T)) %>% 
+  mutate(hh_fished = if_else(fished > 0, 1, 0)) %>%
+  select(interview__key, hh_fished)
+
+# check
+nofish_hh %>% tabyl(hh_fished) %>% adorn_totals() # all hh's have a 0 or 1.
+
+#1-3 : quantile of TOTAL fishing hours per (fishing) household
+fish_hrs <- a4_labor %>% 
+  select(interview__key, respondent_id, a4_hrs_total) %>% 
+  group_by(interview__key) %>% 
+  summarise(hh_fishing_hrs = sum(a4_hrs_total, na.rm=T)) %>%
+  filter(hh_fishing_hrs > 0)
+
+qt_fishing = quantile(fish_hrs$hh_fishing_hrs)
+
+fish_hrs_qt <- fish_hrs %>% 
+  mutate(hh_fishing_qt = case_when(is.na(hh_fishing_hrs) ~ NA_character_,
+                                   hh_fishing_hrs == 0 ~ NA_character_, 
+                                        hh_fishing_hrs <= qt_fishing[[2]] ~ "low", 
+                                        hh_fishing_hrs >= qt_fishing[[4]] ~ "high",
+                                        TRUE ~ "mid"))
+
+# 1016 fishing households with > 0 fishing hours
+# fish_hrs_qt %>% tabyl(hh_fishing_qt) %>% adorn_totals()
+
+a5_fishing_id_hh <- hh_tbl %>% 
+  left_join(fish_hrs_qt, by = "interview__key") %>% 
+  left_join(profish_hh, by = "interview__key") %>% 
+  left_join(nofish_hh,  by = "interview__key") %>% 
+  mutate(a5_fishing_id = case_when(professional_fisher == "professional" ~ 4, 
+                                   hh_fishing_qt == "high" ~ 3,
+                                   hh_fishing_qt == "mid" ~ 2, 
+                                   hh_fishing_qt == "low" ~ 1, 
+                                   hh_fished == 0 ~ 0,
+                                   TRUE ~ NA_real_), 
+         a5_fishing_id = factor(a5_fishing_id, ordered = T, levels = c(0,1,2,3,4))) %>% 
+  drop_na(a5_fishing_id)
+  
+
+a5_fishing_id_hh %>% tabyl(a5_fishing_id) %>% adorn_totals() #2180 fishing hh's
+
+a5_fishing_id_hh %>% 
+  group_by(island_village, a5_fishing_id) %>% 
+  summarise(n_hh = n()) %>% 
+  left_join(village_tbl) %>% 
+  ggplot(aes(x = island_village, y = n_hh, fill = a5_fishing_id))+
+  geom_bar(stat = "identity")+
+  theme_gov_dark()
+
+ggsave(here("MS_access","plots","a5_fishing_id_hh.png"), height = 7, width = 18)
+```
+
+### a5:: education level
+
+- P205. Has %hmName% ever attended school or preschool ? yes / no / do not know
+-- no = '0'
+- P207. What is the highest level of schooling has %hmName% attended?? 
+-- 0 = preschool - 05 tiertiary (re-scale 1-6)
+
+NEW SCALE: 
+0 = none 
+1 = Preschool, nursery, kindergarten
+2 = Primary school (Class 1 - Class 6)
+3 = Lower secondary school (Form 1 -Form 3)
+4 = Higher secondary school (Form 4 - Form 7)
+5 = Post-secondary, non tertiary (vocational)
+6 = Tertiary/University
+NA = unknown
+
+```{r}
+a5_edu <- hh %>% 
+  select(interview__key, p205, p207, p207n) %>%
+  mutate(edu_level = case_when(p205 == "No" ~ 0,
+                               str_detect(p207, "kinder") ~ 1, 
+                               str_detect(p207, "Primary") ~ 2, 
+                               str_detect(p207, "Lower secondary") ~ 3, 
+                               str_detect(p207, "Higher secondary") ~ 4, 
+                               str_detect(p207, "Post-secondary") ~ 5,
+                               str_detect(p207, "Tertiary") ~ 6,
+                               str_detect(p207, "Other") ~ 999)) %>% 
+  mutate(edu_other = case_when(str_detect(p207n, "year 5|fifth") ~ 2, 
+                               str_detect(p207n, "te aro|mitinare|church") ~ 3,
+                                str_detect(p207n, "class 8|class 9|standard 9|disable|special") ~ 3,
+                                str_detect(p207n, "BST|degree|certificate") ~ 4,
+                                str_detect(p207n, "Captain|maritime|Technical|red cross") ~ 5,
+                                str_detect(p207n, "KTC|USP") ~ 6)) %>% 
+  mutate(edu_level = if_else(edu_level == 999, edu_other, edu_level))
+
+a5_edu %>% tabyl(p205)
+a5_edu %>% tabyl(p207)
+
+a5_edu %>% tabyl(edu_level)
+
+# highest level of education per household
+# 0 = none 1 = kinder, 2 = primary, 3 = lower secondary, 
+# 4 = higher secondary, 5 = post-secondary, 6 = tertiary
+a5_edu_hh <- a5_edu %>% 
+  group_by(interview__key) %>% 
+  summarise(max_edu_level = max(edu_level, na.rm = T)) %>% 
+  mutate(max_edu_level = factor(max_edu_level, levels = c(0,1,2,3,4,5,6), ordered = T))
+
+# checks
+a5_edu_hh %>% tabyl(max_edu_level) # no NA's; most completed higher secondary (high school)
+a5_edu_hh$max_edu_level
+
+a5_edu_hh %>% 
+  left_join(hh_tbl) %>% 
+  group_by(island_village, max_edu_level) %>% 
+  summarise(n_hh = n()) %>% 
+  ggplot(aes(x = island_village, y = n_hh, fill = max_edu_level))+
+  scale_fill_brewer(palette = "Set3")+
+  geom_bar(stat = "identity")+
+  theme_gov_dark()
+
+ggsave(here("MS_access","plots","a5_edu_hh.png"), height = 7, width = 18)
+
+# append to 'access_df'
+```
+
+### a5:: knowledge indicator
+- NOPE: PCA of Fishing identity + Education level
+- MAYBE: knowledge 'score' based on fishing & education.
+
+```{r}
+
+a5_knowlg_hh <- hh_tbl %>% 
+  left_join(a5_fishing_id_hh[c("interview__key", "a5_fishing_id")]) %>% 
+  rename(fishing_id = a5_fishing_id) %>% 
+  left_join(a5_edu_hh)
+
+# correlation is low between these two variables
+a5_knowlg_hh %>% 
+  select(fishing_id, max_edu_level) %>% 
+  mutate(across(everything(), as.numeric)) %>% 
+  cor(use = "pairwise.complete.obs", method = "pearson")
+
+
+# pca 
+pca_knowlg_matrix <- a5_knowlg_hh %>% 
+  column_to_rownames(var = "interview__key") %>% 
+  select(fishing_id, max_edu_level) %>% 
+  mutate(across(everything(), as.numeric)) %>% 
+  drop_na()
+  
+pca_knowlg <- pca(pca_knowlg_matrix, scale = c("uv"), center = TRUE, method = "svd", nPcs = 1)
+
+a5_knowledge_hh <- 
+  tibble(pc1_knowlg = scores(pca_knowlg)[,1]) %>% 
+  bind_cols(pca_knowlg_matrix) %>% 
+  rownames_to_column(var = "interview__key")
+
+a5_knowledge_hh %>% 
+  select(-interview__key) %>% 
+  cor(use = "pairwise.complete.obs", method = "pearson") %>% 
+  corrplot(method = "color", addCoef.col = 'black', diag = F, tl.cex = .5, number.cex = 0.5)
+
+# pca is weighted towards education level.
+a5_knowledge_hh %>% 
+  pivot_longer(cols = c(max_edu_level, fishing_id), names_to = "var") %>% 
+  ggplot(aes(x = pc1_knowlg, y = value, colour = var, group = interview__key))+
+  geom_point(alpha = 0.3)+
+  scale_colour_manual(values = c("red","blue"))+
+  geom_line(alpha = 0.3)
+
+
+# try again ---- 
+# want a variable that is HIGH for either: 
+# high fishing knowledge AND high edu --> 4
+# high fishing knowledge AND ANY edu  --> 3
+# high edu and ANY fishing knowledge  --> 3
+# mid / mid -- > 2
+# low fishing knowledge AND low edu   --> 1
+
+a5_knowlg_scale <- a5_knowlg_hh %>% 
+  mutate(across(c(fishing_id, max_edu_level), as.numeric)) %>% 
+  mutate(fishing_cat = case_when(fishing_id >= 4 ~ "high",
+                                 fishing_id >= 2 ~ "mid", 
+                                 fishing_id < 2 ~ "low"), 
+         edu_cat = case_when(max_edu_level >= 6 ~ "high", 
+                             max_edu_level == 5 ~ "mid", 
+                             max_edu_level <= 4 ~ "low")) %>% 
+  mutate(knowledge_cat = case_when(fishing_cat == "high" | edu_cat == "high" ~ "high", 
+                                   fishing_cat == "low" & edu_cat == "low" ~ "low", 
+                                   TRUE ~ "mid"),
+         knowledge_cat = factor(knowledge_cat, levels = c("low","mid","high")))
+  
+
+a5_knowlg_scale %>% tabyl(fishing_cat, fishing_id)
+a5_knowlg_scale %>% tabyl(edu_cat, max_edu_level)
+
+a5_knowlg_scale %>% tabyl(fishing_cat)
+a5_knowlg_scale %>% tabyl(edu_cat)
+
+#a5_knowlg_scale %>% view()
+
+# Plots ----
+a5_knowlg_scale %>% 
+  select(fishing_id, max_edu_level, knowledge_cat) %>% 
+  pivot_longer(cols = -c(knowledge_cat), names_to = "var") %>% 
+  ggplot(aes(x = knowledge_cat, y = value, colour = var))+
+  geom_jitter(width=0.2, height = 0.1, alpha = 0.5)
+
+# histograms
+a5_knowlg_scale %>% 
+  ggplot(aes(x=factor(fishing_id)))+
+  geom_histogram(stat = "count")
+
+a5_knowlg_scale %>% 
+  ggplot(aes(x=factor(max_edu_level)))+
+  geom_histogram(stat = "count")
+
+a5_knowlg_scale %>% 
+  ggplot(aes(x=knowledge_cat))+
+  geom_histogram(stat = "count")
+
+# by island
+a5_knowlg_scale %>% 
+  group_by(island_village, knowledge_cat) %>% 
+  summarise(n_hh = n()) %>% 
+  left_join(village_tbl) %>% 
+  ggplot(aes(x = island_village, y = n_hh, fill = knowledge_cat))+
+  geom_bar(stat="identity")+
+  scale_fill_manual(values = cat_palette[3:5])+
+  theme_gov_dark()
+
+ggsave(here("MS_access","plots","a5_knowlg_scale.png"), height = 7, width = 18)
+```
+
+
+
+
+## A6. Access to authority
+- individual can attend meeting	(a6_can_attend_mtg) --> 
+- someone in *household* can *attend meeting*	(a6_can_attend_mtg_hh)
+- see 'explore-access-vars'
+
+Use VRS1_8C-VRS1_8i which asks about “Are there any AGE/GENDER/RESIDENTIAL/OTHER restrictions to who can *attend meetings*?”
+Then use the household data to filter who fit these age/gender/etc. rules
+
+VRS1_8. Are there organized meetings of village residents to discuss village issues and events?
+VRS1_8b. Who attends these meetings?
+VRS1_8b_oth. Specify the 'Other' option ?
+VRS1_8c. Are there any AGE restrictions to these meetings?
+VRS1_8d. What is the 'Age' restriction ?
+VRS1_8e. Are there any GENDER restrictions to
+VRS1_8f. What is the 'Gender' restriction?
+VRS1_8g. Are there any RESIDENTIAL restrictions to these meetings?
+VRS1_8h. Please type in what is the 'Residential'
+VRS1_8i. Are there any OTHER restrictions to these meetings?
+VRS1_8i_oth. Please type in what is the 'Other' restriction ?
+
+
+Can attend, based on: 
+- (1) Gender - if rules (a6_meeting_gender_rules; 0/1); females are / are not allowed
+- (2) Age - if rules (a6_meeting_age_rules; 0/1); get age group (a6_meeting_age_grp)
+- (3) Residence - if rule s(a6_meeting_residental_rules; 0/1); assume must be 'village member'.
+  * NOTE: There are some additional rules; either in I-Kiribati or 'village elders' but we dont 
+    have enough information to identify these cases)
+
+### a6:: summary: has rule (0,1), sum rules
+```{r}
+#VRS1_8. Are there organized meetings of village residents to discuss village issues and events?
+VRS1_8_cols <- vrs_labels[27:38,1] %>% pull()
+
+VRS1_8_resp <- vrs %>%
+  select(interview__key, vrs_island, island_village, all_of(VRS1_8_cols))
+
+a6_authority_rules <- VRS1_8_resp %>% 
+  mutate(a6_meeting_occurs = if_else(organized_meeting == "Yes", 1, 0), 
+         a6_meeting_gender_rules = case_when(meeting_gender == "Yes" ~ 1, 
+                                             meeting_gender == "No" ~ 0),
+         a6_meeting_age_rules = case_when(meeting_age == "Yes" ~ 1, 
+                                             meeting_age == "No" ~ 0),
+         a6_meeting_residential_rules = case_when(meeting_residential == "Yes" ~ 1, 
+                                             meeting_residential == "No" ~ 0),
+         a6_meeting_other_rules = case_when(meeting_other == "Yes" ~ 1, 
+                                             meeting_other == "No" ~ 0)) %>% 
+  mutate(a6_meeting_sumrules = rowSums(across(c(a6_meeting_gender_rules, a6_meeting_age_rules, 
+                                                a6_meeting_residential_rules, a6_meeting_other_rules))), na.rm = T) %>% 
+  rename(a6_meeting_who_attends = meeting_attend,
+         a6_meeting_age_grp = age_grp)
+
+```
+
+### a6:: descriptive plots
+```{r}
+# plots ---
+a6_authority_rules %>% 
+  select(island_village, starts_with("a6_")) %>% 
+  left_join(village_tbl) %>% 
+  select(-a6_meeting_who_attends) %>% 
+  pivot_longer(cols = starts_with("a6_"), values_to = "rule_sum") %>% 
+  ggplot(aes(x = island_village, y = name, colour = name, size = rule_sum))+
+    geom_point()+
+    scale_size(range = c(0,6))+
+    ggtitle("A6 Summary by village: has rule (0,1), sum rules")+
+    theme(axis.text.x = element_text(angle = 90))
+  
+
+ggsave(here("MS_access","plots","a6_authority_rules_summary.png"), 
+       height = 8, width = 20)
+```
+
+### a6:: descriptive tables
+```{r}
+# Tables (descriptive answers) --- 
+
+# Who attends 
+a6_authority_rules %>% 
+  select(interview__key, island_village, a6_meeting_who_attends, meeting_attend_other) %>% 
+  drop_na(a6_meeting_who_attends) %>% 
+  arrange(island_village) %>% 
+  kbl() %>%
+  kable_styling(full_width = F)
+
+a6_authority_rules %>% 
+  select(interview__key, island_village, a6_meeting_who_attends, meeting_attend_other) %>% 
+  tabyl(a6_meeting_who_attends)
+
+# Age rules
+#VRS1_8c. Are there any AGE restrictions to these meetings? meeting_age
+#VRS1_8d. What is the 'Age' restriction ? age_grp
+a6_authority_rules %>% 
+  select(interview__key, vrs_island, island_village, meeting_age, a6_meeting_age_grp) %>% 
+  drop_na(a6_meeting_age_grp) %>% 
+  arrange(island_village) %>% 
+  kbl() %>%
+  kable_styling(full_width = F)
+
+a6_authority_rules %>% 
+  select(interview__key, vrs_island, island_village, meeting_age, a6_meeting_age_grp) %>% 
+  tabyl(a6_meeting_age_grp)
+
+# Gender rules
+# VRS1_8e. Are there any GENDER restrictions to these meetings? meeting_gender
+# VRS1_8f. What is the 'Gender' restriction ? gender_grp
+a6_authority_rules %>% 
+  select(interview__key, vrs_island, island_village, meeting_gender, gender_grp) %>% 
+  drop_na(gender_grp) %>% 
+  arrange(island_village) %>% 
+  kbl() %>%
+  kable_styling(full_width = F)
+
+a6_authority_rules %>% 
+  select(interview__key, vrs_island, island_village, meeting_gender, gender_grp) %>% 
+  tabyl(gender_grp)
+
+# Residential Rules
+#VRS1_8g. Are there any RESIDENTIAL restrictions to these meetings?
+#VRS1_8h. Please type in what is the 'Residential'
+
+a6_authority_rules %>% 
+  select(interview__key, vrs_island, island_village, meeting_residential, resident_grp) %>% 
+  drop_na(resident_grp) %>% 
+  arrange(island_village) %>% 
+  kbl() %>%
+  kable_styling(full_width = F)
+
+# Other Restrictions
+#VRS1_8i. Are there any OTHER restrictions to these meetings?
+#VRS1_8i_oth. Please type in what is the 'Other'
+a6_authority_rules %>% 
+  select(interview__key, vrs_island, island_village, meeting_other, other_grp) %>% 
+  drop_na(other_grp) %>% 
+  arrange(island_village) %>% 
+  kbl() %>%
+  kable_styling(full_width = F)
+
+```
+
+### a6:: identify individuals
+
+```{r}
+a6_authority_rules_slim <- village_tbl %>% 
+  left_join(a6_authority_rules) %>% 
+  select(island, island_village, interview__key, starts_with("a6_")) %>% 
+  mutate(a6_meeting_age_grp = if_else(is.na(a6_meeting_age_grp), 999, a6_meeting_age_grp),
+         a6_meeting_gender_rules = if_else(is.na(a6_meeting_gender_rules), 0, a6_meeting_gender_rules),
+         a6_meeting_residential_rules = case_when((a6_meeting_residential_rules == 1 | 
+                                                     str_detect(a6_meeting_who_attends, "Any member")) ~ 1,
+                                                  TRUE ~ 0)) %>% 
+  select(island, island_village, interview__key, a6_meeting_age_grp, a6_meeting_gender_rules, a6_meeting_residential_rules) %>% 
+  distinct() %>% 
+  filter(!interview__key %in% c("12-02-45-91","85-32-78-41")) %>% # remove dupes with less complete / conservative answers.
+  select(-interview__key)
+
+# check for dupes
+# a6_authority_rules_slim %>% get_dupes(island_village)
+
+a6_individual <- hh %>% 
+  select(interview__key, respondent_id, island_village, age, sex, p115) %>% 
+  mutate(resident = if_else(str_detect(p115, "Visitor"), 0, 1)) %>% 
+  select(-p115) %>% 
+  left_join(a6_authority_rules_slim, by = "island_village") %>% 
+  mutate(a6_canattend_gender = if_else((a6_meeting_gender_rules == 1 & sex == "Female"), 0, 1),
+         a6_canattend_age = if_else(age <= a6_meeting_age_grp, 1, 0),
+         a6_canattend_residence = if_else((a6_meeting_residential_rules == 1 & resident == 0), 0, 1)) %>% 
+  mutate(a6_canattend_sum = rowSums(across(contains("canattend")),na.rm=T)) %>% 
+  mutate(a6_canattand_mtg = if_else(a6_canattend_sum == 3, 1, 0))
+
+a6_individual %>% tabyl(a6_canattend_gender)
+a6_individual %>% tabyl(a6_canattend_age)
+a6_individual %>% tabyl(a6_canattend_residence)
+a6_individual %>% tabyl(a6_canattand_mtg)
+```
+
+### a6:: identify household, plot
+```{r}
+# someone in household can attend: 
+a6_hh <- a6_individual %>% 
+  select(interview__key, respondent_id, island_village, a6_canattand_mtg) %>% 
+  group_by(interview__key) %>% 
+  summarise(a6_canattend_mtg_hh = max(a6_canattand_mtg, na.rm=T), 
+            a6_canattend_mtg_hh_sum = sum(a6_canattand_mtg, na.rm = T)) %>% 
+  mutate(a6_canattend_mtg_hh_log = log1p(a6_canattend_mtg_hh_sum)) %>% 
+  mutate(a6_canattend_mtg_hh = factor(a6_canattend_mtg_hh, levels = c(0,1)))
+
+a6_hh %>% tabyl(a6_canattend_mtg_hh) # all but 71 hh's have at least 1 individual that can attend
+a6_hh %>% pull(a6_canattend_mtg_hh_sum) %>% hist(main = "# of hh members that can attend mtg")
+a6_hh %>% pull(a6_canattend_mtg_hh_log) %>% hist(main = "LOG(# of hh members that can attend mtg)")
+
+# plot --- 
+a6_hh %>% 
+  left_join(hh_tbl) %>% 
+  ggplot(aes(x = island_village, y = a6_canattend_mtg_hh_log, colour = island))+
+  geom_boxplot()+
+  scale_colour_manual(values = island_palette)+
+  theme_gov_dark()
+
+ggsave(here("MS_access","plots","a6_canattend_mtg_hh_log.png"), height = 7, width = 18)
+
+a6_hh %>% 
+  left_join(hh_ame) %>% 
+  left_join(hh_tbl) %>% 
+  ggplot(aes(x = hh_size, y = a6_canattend_mtg_hh_log, colour = island))+
+  geom_jitter(width = .2, height = .05, size = .5)+
+  scale_colour_manual(values = island_palette)
+         
+```
+
+
+
+### a6:: profession
+- Whether or not the household had a person(s) of authority IN the household. 
+- Taking the occupation question and where someone in the HH answered that they
+  were a certain kind of authority, ADD that to the metric. 
+- NOTE: these are SALARIED positions only. No one answered 'traditional chiefs'
+- Whomever answered p814 (primary job) / P847 (secondary job) as:
+
+    - Legislators, Senior government officials - "Legislators and senior officials" 
+    - Minister - "Social and religious professionals" 
+    - Traditional chiefs and heads of village Kaupule
+    - Senior officials of special-interest organizations Consulate 
+
+
+p814:
+Legislators and senior officials
+Regulatory government associate professionals
+Social and religious professionals
+
+p847:
+(Same as above; N/A)
+
+```{r}
+hh %>% tabyl(p814) # This
+hh %>% tabyl(p814_1)
+hh %>% tabyl(p814_2)
+
+hh %>% tabyl(p847)
+hh %>% tabyl(p847_1)
+hh %>% tabyl(p847_2)
+
+prof_list <- paste(c("Legal professionals",
+  "Legal, social and religious associate professionals", 
+  "Legislators and senior officials",
+  "Regulatory government associate professionals",
+  "Social and religious professionals"), collapse = "|")
+
+
+p814 <- hh %>%
+  select(interview__key, respondent_id, p814) %>%
+  filter(str_detect(p814, prof_list)) %>% 
+  mutate(authority_score = 1)
+
+p847 <- hh %>%
+  select(interview__key, respondent_id, p847) %>%
+  filter(str_detect(p847, prof_list)) %>% 
+  mutate(authority_score = 1)
+
+# Combine and reduce to one score per household
+# 165 hh's with authority_score == 1
+a6_prof <- bind_rows(p814, p847) %>% 
+  distinct(interview__key, authority_score)
+
+a6_prof
+
+# Household level metric
+# Household contains a member with "auth_score == 1"
+max_score <- a6_hh$a6_canattend_mtg_hh_log %>% max()
+
+a6_hh$a6_canattend_mtg_hh_log %>% hist()
+a6_hh$a6_canattend_mtg_hh_sum %>% min()
+
+a6_prof_hh <- a6_hh %>% 
+  left_join(a6_prof) %>% 
+  mutate(authority_score = replace_na(authority_score, 0)) %>% 
+  mutate(a6_index = if_else(authority_score ==1, max_score, a6_canattend_mtg_hh_log)) %>% 
+  mutate(a6_score = case_when(authority_score == 1 ~ 3, 
+                              a6_canattend_mtg_hh_sum >= 2 ~ 2, 
+                              a6_canattend_mtg_hh_sum >= 1 ~ 1, 
+                              a6_canattend_mtg_hh_sum == 0 ~ 0, 
+                              TRUE ~ NA_real_)) %>% 
+  mutate(a6_score = factor(a6_score, levels = c(0,1,2,3)))
+
+a6_prof_hh %>% tabyl(a6_score)
+a6_prof_hh %>% tabyl(a6_index)
+
+a6_prof_hh %>% 
+  left_join(hh_tbl) %>% 
+  group_by(island_village, a6_score) %>% 
+  summarise(n_households = n()) %>% 
+  ggplot(aes(y = n_households, x = island_village, fill = a6_score))+
+  geom_bar(stat = "identity")+
+  scale_fill_manual(values = cat_palette[2:5])+
+  theme(axis.text.x = element_text(size = 7,angle = 90, vjust = 0.5, hjust=1), 
+        axis.title.x=element_blank(),
+        legend.position = "bottom")
+
+ggsave(here("MS_access","plots","a6_authority_score.png"), height = 7, width = 18)
+
+```
+
+
+## A7: Access to fishing via identity
+- Access based on identity (age, gender, etc...) - *individual* has legal fishing rights
+- Access based on identity (age, gender, etc...) - someone in *household* has legal fishing rights
+
+Identity Rules: 
+
+VRS4_18. In your village, are there TRADITIONAL or SPIRITUAL rules for who can fish/glean based on?
+VRS4_19. In your village, are there LOCAL COMMUNITY rules for who can fish/glean based on?
+VRS4_20. In your village, are there KIRIBATI GOVERNMENT rules for who can fish/glean based on?
+
+Plus...
+VRS4_21. Are there penalties for people who don't adhere to...?
+VRS4_21b. Which do you think is the most important source of rights and rules for maintaining people's access to fish in your village?
+
+### a7:: select identity rules
+```{r}
+# VRS4_18. In your village, are there TRADITIONAL or SPIRITUAL rules for who can fish/glean based on?
+VRS4_18_cols <- vrs_labels %>% filter(str_detect(col.names, "traditional_rule")) %>%
+  pull(col.names)
+
+VRS4_18_resp <- vrs %>%
+  select(interview__key, vrs_island, island_village, all_of(VRS4_18_cols)) %>% 
+  mutate(a7_traditional_rules_sum = rowSums(across(contains("traditional_rule"))))
+
+# 3/33 villages have TRADITIONAL or SPIRITUAL rules for who can fish/glean based on?
+# sum of multiple-select; number of answer's checked. 0 = none.
+VRS4_18_resp %>% 
+  tabyl(island_village, a7_traditional_rules_sum) %>% 
+  adorn_totals()
+
+# VRS4_19. In your village, are there LOCAL COMMUNITY rules for who can fish/glean based on?
+VRS4_19_cols <- vrs_labels %>% filter(str_detect(col.names, "local_rule")) %>% 
+  pull(col.names)
+
+VRS4_19_resp <- vrs %>%
+  select(interview__key, island_village, all_of(VRS4_19_cols)) %>% 
+  mutate(a7_local_rules_sum = rowSums(across(contains("local_rule"))))
+
+VRS4_19_resp %>% 
+  tabyl(island_village, a7_local_rules_sum) %>% 
+  adorn_totals
+
+# VRS4_20. In your village, are there KIRIBATI GOVERNMENT rules for who can fish/glean based on?
+VRS4_20_cols <- vrs_labels %>% filter(str_detect(col.names, "govt_rule")) %>% 
+  pull(col.names)
+
+VRS4_20_resp <- vrs %>%
+  select(interview__key, island_village, all_of(VRS4_20_cols)) %>% 
+  mutate(a7_govt_rules_sum = rowSums(across(contains("govt_rule"))))
+
+VRS4_20_resp %>% 
+  tabyl(island_village, a7_govt_rules_sum) %>% 
+  adorn_totals()
+
+
+# VRS4_21. Are there penalties for people who don't adhere to...?
+# select multiple: traditional / spiritual rules, local community rules, govt rules
+VRS4_21_cols <- vrs_labels %>% filter(str_detect(col.names, "penalty_rule")) %>% 
+   pull(col.names)
+
+VRS4_21_resp <- vrs %>%
+  select(interview__key, island_village, all_of(VRS4_21_cols)) %>% 
+  rename(penalty_rule1_traditional_spritual = penalty_rule__1, 
+         penalty_rule2_local_community = penalty_rule__2, 
+         penalty_rule3_kiribati_govt = penalty_rule__3) %>% 
+  mutate(vrs4_21_sum = rowSums(across(contains("penalty_rule")), na.rm=T))
+
+# sum of multiple-select; number of answers checked. 0 = none.
+VRS4_21_resp %>% 
+  tabyl(island_village, vrs4_21_sum) %>% 
+  adorn_totals()
+
+
+# VRS4_21b. Which do you think is the most important source of rights and rules for maintaining people's 
+# access to fish in your village?
+VRS4_21b_cols <- vrs_labels %>% filter(str_detect(col.names, "important_rule_access")) %>% 
+  pull(col.names)
+
+VRS4_21b_resp <- vrs %>%
+  select(interview__key, island_village, important_rule_access)
+
+VRS4_21b_resp %>% 
+  tabyl(island_village,important_rule_access) %>%  
+  adorn_totals()
+
+
+a7_identity_rules <- VRS4_18_resp %>% 
+  left_join(VRS4_19_resp) %>% 
+  left_join(VRS4_20_resp) %>% 
+  left_join(VRS4_21_resp) %>%
+  left_join(VRS4_21b_resp) %>% 
+  mutate(a7_all_rules_sum = rowSums(across(contains("rules_sum")), na.rm=T)) %>% 
+  distinct(island_village, .keep_all = T) # makin has multiple responses but all the same
+
+a7_identity_rules
+
+a7_identity_rules %>% select(contains("rules_sum"))
+
+```
+
+### a7:: summary plots
+```{r}
+# PLOTS --- 
+a7_identity_rules %>% 
+  select(island_village, starts_with("a7_")) %>% 
+  left_join(village_tbl) %>% 
+  pivot_longer(cols = starts_with("a7_"), values_to = "rule_sum") %>% 
+  ggplot(aes(x = island_village, y = name, colour = name, size = rule_sum))+
+    geom_point()+
+    scale_size(range = c(0,6))+
+    ggtitle("A7 Summary by village: has rule (0,1), sum rules")+
+    theme(axis.text.x = element_text(angle = 90))
+  
+
+ggsave(here("MS_access","plots","a7_identity_rules_summary.png"), 
+       height = 8, width = 20)
+
+
+# Traditional or Spiritual Rules
+a7_identity_rules %>% 
+  select(vrs_island, island_village, all_of(VRS4_18_cols)) %>% 
+  pivot_longer(contains("traditional_rule"), names_to = "col.names") %>% 
+  mutate(value = factor(value)) %>% 
+  left_join(vrs_labels) %>% 
+  ggplot(aes(y=col.labels, x = island_village, colour = value, size = value, group = vrs_island))+
+  geom_point()+
+  scale_size_manual(values = c(0,2))+
+  scale_colour_manual(values = c("gray","royalblue"))+
+  theme_bw()+
+  theme(axis.text.x = element_text(angle = 90))+
+  ggtitle("VRS4_18: Traditional or Spiritual Rules")
+
+ggsave(here("MS_access","plots","a7_traditional_rules.png"), 
+       height = 6, width = 20)
+
+# Local or Community Rules
+a7_identity_rules %>% 
+  select(vrs_island, island_village, all_of(VRS4_19_cols)) %>% 
+  pivot_longer(contains("local_rule"), names_to = "col.names") %>% 
+  mutate(value = factor(value)) %>% 
+  left_join(vrs_labels) %>% 
+  ggplot(aes(y=col.labels, x = island_village, colour = value, size = value, group = vrs_island))+
+  geom_point()+
+  scale_size_manual(values = c(0,2))+
+  scale_colour_manual(values = c("gray","royalblue"))+
+  theme_bw()+
+  theme(axis.text.x = element_text(angle = 90))+ 
+  ggtitle("VRS4_19: Local or Community Rules")
+
+ggsave(here("MS_access","plots","a7_local_rules.png"), 
+       height = 6, width = 20)
+
+
+# Kiribati Govt Rules
+a7_identity_rules %>% 
+  select(vrs_island, island_village, all_of(VRS4_20_cols)) %>% 
+  pivot_longer(contains("govt_rule"), names_to = "col.names") %>% 
+  mutate(value = factor(value)) %>% 
+  left_join(vrs_labels) %>% 
+  ggplot(aes(y=col.labels, x = island_village, colour = value, size = value, group = vrs_island))+
+  geom_point()+
+  scale_size_manual(values = c(0,2))+
+  scale_colour_manual(values = c("gray","royalblue"))+
+  theme_bw()+
+  theme(axis.text.x = element_text(angle = 90))+ 
+  ggtitle("VRS4_20: Kiribati Govt Rules")
+
+ggsave(here("MS_access","plots","a7_govt_rules.png"), 
+       height = 6, width = 20)
+
+```
+
+### a7:: identify individuals
+```{r}
+a7_rules <- a7_identity_rules %>%
+  mutate(a7_age_rules_sum =  rowSums(across(ends_with("rule__1")),na.rm=T), 
+         a7_age_rules_yn = if_else(a7_age_rules_sum > 0, 1, 0)) %>% 
+  mutate(a7_gender_rules_sum =  rowSums(across(ends_with("rule__2")),na.rm=T), 
+         a7_gender_rules_yn = if_else(a7_gender_rules_sum > 0, 1, 0)) %>%
+  mutate(a7_residence_rules_sum =  rowSums(across(ends_with("rule__4")),na.rm=T), 
+         a7_residence_rules_yn = if_else(a7_residence_rules_sum > 0, 1, 0)) %>% 
+  select(island_village, ends_with("rules_yn")) %>% 
+  # For the (1) village with age restriction on fishing; use the meeting group age:
+  left_join(a6_authority_rules_slim[c("island_village","a6_meeting_age_grp")]) %>% 
+  mutate(a7_age_grp = if_else(a7_age_rules_yn == 1, a6_meeting_age_grp, NA_real_)) %>% 
+  select(-a6_meeting_age_grp)
+  
+
+a7_rules
+# check for any village dupes - OK; remove interview__key
+# a7_rules %>% get_dupes(island_village)  
+  
+a7_rules$a7_age_rules_yn %>% tabyl() # 1 village has age rules
+a7_rules$a7_gender_rules_yn %>% tabyl() # 1 village has gender rules
+a7_rules$a7_residence_rules_yn %>% tabyl() # 3 villages have residence rules
+
+a7_individual <- hh %>% 
+  select(interview__key, respondent_id, island_village, age, sex, p115) %>% 
+  mutate(resident = if_else(str_detect(p115, "Visitor"), 0, 1)) %>% 
+  select(-p115) %>% 
+  left_join(a7_rules, by = "island_village") %>%
+  mutate(a7_canfish_age = if_else((a7_age_rules_yn == 1 & age < a7_age_grp), 0, 1),
+         a7_canfish_gender = if_else((a7_gender_rules_yn == 1 & sex == "Female"), 0, 1),
+         a7_canfish_resident = if_else((a7_residence_rules_yn == 1 & resident == 0), 0, 1)) %>% 
+  mutate(a7_canfish_sum = rowSums(across(contains("canfish")),na.rm=T)) %>% 
+  mutate(a7_canfish = if_else(a7_canfish_sum == 3, 1, 0)) %>% 
+  # ! Two villages do NOT HAVE VRS survey data for who can fish. drop these. (they got added b/c of hh join above)
+  filter(!island_village %in% c("beru_aoniman","south_tarawa_antebuka"))
+
+a7_individual %>% tabyl(a7_canfish) # all but 32 individuals have access
+# a7_individual %>% view()
+
+#!Two villages do NOT HAVE VRS survey data for who can fish. Dropped (see above)
+#a7_individual %>% tabyl(island_village, a7_age_rules_yn)
+#a7_individual %>% tabyl(island_village, a7_gender_rules_yn)
+#a7_individual %>% tabyl(island_village, a7_residence_rules_yn)
+```
+
+### a7:: identify households
+
+```{r}
+# proportion of adults in hh that can fish
+# almost all hh's = 1 (all adults can fish)
+# a7_hh <- a7_individual %>% 
+#   select(interview__key, respondent_id, island_village, a7_canfish) %>% 
+#   left_join(id_tbl, by = c("interview__key","respondent_id")) %>%  #new HERE
+#   filter(age_category == "adult") %>% 
+#   group_by(interview__key) %>% 
+#   summarise(a7_canfish_hh_sum = sum(a7_canfish, na.rm=T)) %>% 
+#   left_join(hh_ageclass) %>% 
+#   mutate(a7_canfish_hh_prop = a7_canfish_hh_sum / n_adults)
+
+
+# sum of household members, above age 15, that can fish
+a7_hh <- a7_individual %>% 
+  select(interview__key, respondent_id, island_village, a7_canfish) %>% 
+  left_join(id_tbl, by = c("interview__key","respondent_id")) %>%  #new HERE
+  filter(age_category == "adult") %>% 
+  group_by(interview__key) %>% 
+  summarise(a7_canfish_hh_sum = sum(a7_canfish, na.rm=T)) %>% 
+  left_join(hh_ageclass) %>% 
+  mutate(a7_canfish_hh_prop = a7_canfish_hh_sum / n_adults, 
+         a7_canfish_hh_log = log1p(a7_canfish_hh_sum))
+
+# quick plots:
+a7_hh$a7_canfish_hh_sum %>% 
+  hist(main ="# of individuals that can fish within a household") # ~= household size
+a7_hh$a7_canfish_hh_log %>% 
+  hist(main ="LOG (# of individuals that can fish within a household)") # using
+
+
+# percentiles
+percentile_canfish <- ecdf(a7_hh$a7_canfish_hh_sum)
+# percentile_canfish(4)
+
+# quantiles of # of people in hh that can fish
+# a7_canfish_qt <- a7_hh$a7_canfish_hh_sum %>% quantile()
+
+a7_hh <- a7_hh %>% 
+  mutate(a7_canfish_hh_score = 
+         case_when(is.na(a7_canfish_hh_sum) ~ NA_character_, 
+                   a7_canfish_hh_sum == 0 ~ "none", 
+                   a7_canfish_hh_sum == 1 ~ "low", 
+                   a7_canfish_hh_sum >= 2 & a7_canfish_hh_sum <= 4 ~ "mid", 
+                   a7_canfish_hh_sum >= 5 ~ "high",
+                   TRUE ~ NA_character_)) %>% 
+  mutate(a7_canfish_hh_score = factor(a7_canfish_hh_score, 
+                                      levels = c("none","low", "mid", "high"), ordered = T))
+
+a7_hh
+
+a7_hh %>% tabyl(a7_canfish_hh_score) %>% adorn_totals()
+
+```
+
+###a7:: plot
+```{r}
+a7_hh %>% 
+  tabyl(a7_canfish_hh_sum) %>% 
+  ggplot(aes(x = a7_canfish_hh_sum, y = n))+
+  geom_bar(stat = "identity")  
+
+a7_hh %>% 
+  tabyl(a7_canfish_hh_score) %>% 
+  ggplot(aes(x = a7_canfish_hh_score, y = n))+
+  geom_bar(stat = "identity")
+
+a7_hh %>% 
+  left_join(hh_tbl) %>% 
+  group_by(island_village, a7_canfish_hh_score) %>% 
+  summarise(n_hh = n()) %>% 
+  ggplot(aes(x = island_village, y = n_hh, fill = a7_canfish_hh_score))+
+  geom_bar(stat = "identity")+
+  scale_fill_manual(values = cat_palette[3:5])+
+  theme_gov_dark()
+
+ggsave(here("MS_access","plots","a7_canfish_hh_score.png"), height = 7, width = 18)
+
+a7_hh %>% 
+  left_join(hh_tbl) %>% 
+  ggplot(aes(x = island_village, y = a7_canfish_hh_log, colour = island))+
+  geom_boxplot()+
+  scale_colour_manual(values = island_palette)+
+  theme_gov_dark()
+
+ggsave(here("MS_access","plots","a7_canfish_hh_log.png"), height = 7, width = 18)
+
+
+a7_hh %>% 
+  left_join(hh_tbl) %>% 
+  ggplot(aes(x = island_village, y = a7_canfish_hh_sum, colour = island))+
+  geom_boxplot()+
+  scale_colour_manual(values = island_palette)+
+  theme_gov_dark()
+
+ggsave(here("MS_access","plots","a7_canfish_hh.png"), height = 7, width = 18)
+
+
+a7_hh %>% 
+  left_join(hh_ame) %>% 
+  left_join(hh_tbl) %>% 
+  ggplot(aes(x = hh_size, y = a7_canfish_hh_log, colour = island))+
+  geom_jitter(width = .2, height = .05, size = .5)+
+  scale_colour_manual(values = island_palette)
+
+plot(a7_hh$a7_canfish_hh_sum, a7_hh$a7_canfish_hh_log)
+         
+```
+
+
+## A8. Access via social relationships
+- Someone in household is gifted seafood (yes = 1, no = 0)
+
+```{r}
+
+a8_gifted <- hh_tbl %>% 
+  left_join(h1503_gifted[c("interview__key", "consumed_seafood_gifted")]) %>% 
+  mutate(a8_gifted_seafood_hh = if_else(consumed_seafood_gifted > 0, 1, 0), 
+         a8_gifted_seafood_hh = replace_na(a8_gifted_seafood_hh, 0), 
+         a8_gifted_seafood_hh = factor(a8_gifted_seafood_hh, levels = c(0,1)))
+
+a8_gifted %>% tabyl(a8_gifted_seafood_hh)
+
+a8_gifted %>% 
+  group_by(island_village, a8_gifted_seafood_hh) %>% 
+  summarise(n_hh = n()) %>% 
+  ggplot(aes(x=island_village, y = n_hh, fill = a8_gifted_seafood_hh))+
+  geom_bar(stat = "identity")+
+  scale_fill_manual(values = cat_palette[4:5])+
+  ylab("# households")+
+  theme_gov_dark()
+
+ggsave(here("MS_access","plots","a8_gifted_seafood_hh.png"),
+       height = 7, width = 17)
+```
+
+
+# Create analysis table
+- Create streamlined & formatted analysis table for access study
+- Merge necessary tables generated above
+- Format as necessary
+
+```{r eval=TRUE, include=TRUE}
+# Household level data
+# - combine all indicators into one table
+# - deal with any remaining NAs
+# - subset to analysis table (based on incompletes, etc) #TODO! 
+
+# CHECK ----
+# There should only be one household per row in each of these databases. 
+# (do this for each table to be joined.). Check there are no dupes.
+# a5_fishing_id_hh %>% get_dupes(interview__key)
+
+# COMBINE ---- 
+
+access_df <- hh %>% 
+  select(interview__key, island, village, island_village) %>% 
+  distinct() %>% # make sure there's just 1 row per household
+  left_join(hh_ame[c("interview__key","hh_size")]) %>% 
+  left_join(benefits_hh_qt, by = "interview__key") %>% 
+  left_join(a1_tech_new[c("interview__key","a1_tech_score")], by = "interview__key") %>%
+  left_join(a2_msl[c("interview__key", "PC1_exp")], by = "interview__key") %>%  
+  left_join(a3_access[c("interview__key", "a3_marketaccess")], by = "interview__key") %>% 
+  left_join(a4_labor_hh[c("interview__key","a4_hrs_tot_hh_or_hired")], by = "interview__key") %>% 
+  left_join(a5_knowlg_scale[c("interview__key","knowledge_cat")], by = "interview__key") %>% 
+  #left_join(a6_hh, by = "interview__key") %>% 
+  left_join(a6_prof_hh[c("interview__key","a6_score")], by = "interview__key") %>% 
+  left_join(a7_hh, by = "interview__key") %>% 
+  left_join(a8_gifted[c("interview__key","a8_gifted_seafood_hh")], by = "interview__key") %>% 
+  rename(a2_pc1_exp = PC1_exp, 
+         a5_knowledge_cat = knowledge_cat, 
+         a6_authority_score = a6_score) %>% 
+  mutate(a4_hrs_tot_hh_or_hired = replace_na(a4_hrs_tot_hh_or_hired, 0))
+
+access_df %>% skim()
+
+
+# CHECK: 
+# DROP TWO VILLAGES WITH NO VRS SURVEY DATA FOR FISHING RULE ACCESS (drop rows with NA in a7?)
+# CHECK FOR ACCESS TO AUTHORITY
+a7_individual %>% tabyl(island_village,a7_age_rules_yn) # beru_aoniman, south_tarawa_antebuka
+
+# ADD ADDITIONAL DATA USED IN ANALYSIS!
+access_df <- access_df %>% 
+  left_join(village_info[c("island_village", "rururb", "nsf_site", 
+                           "island_development_status", "population_2020")], 
+            by = "island_village") %>% 
+  mutate(rururb = factor(rururb, levels = c("Rural","Urban")), 
+         island_development_status = factor(island_development_status, levels = c("Low","Medium","High"))) %>% 
+  left_join(a5_edu_hh)
+
+
+access_df %>% skim()
+```
+
+# Save 
+- export access table as .csv and .RDS
+```{r eval=TRUE, include=TRUE}
+access_df %>% write_csv(here("Data","access_indicators.csv"))
+access_df %>% saveRDS(here("Data","access_indicators.RDS"))
+
+# also save a2_msl (for 05-qs)
+a2_msl %>% saveRDS(here("Data","access_indicators_a2_msl.RDS"))
+```
+
+

@@ -1,0 +1,1334 @@
+---
+title: "04-model-access.Rmd"
+author: "Whitney Friedman"
+date: "5/3/2022"
+output:
+  rmdformats::robobook:
+    self_contained: true
+    thumbnails: false
+    lightbox: false
+    gallery: false
+    highlight: tango
+---
+
+# 04-model-access
+
+This script contains access models for the 
+the 'access' manuscript led by Katy Seto and Whitney Friedman.
+
+# Setup
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Load things
+
+```{r message=FALSE, warning=FALSE}
+# Load libraries
+library(here) 
+source(here("MS_access", "00-load-libraries.R"))
+library(randomForest)
+library(ranger)
+library(caret)
+library(rpart)
+library(rpart.plot)
+library(ggbeeswarm)
+
+# load plot themes
+source(here("MS_access", "00-plot-themes.R"))
+
+# Load datasets
+source(here("MS_access", "00-load-datasets.R"))
+
+# Format tables
+source(here("MS_access", "01-format-tables.R"))
+
+# load analysis table generated in 03-prep-access-vars.Rmd
+# NOTE: this file needs to be made available
+access_df <- readRDS(here("Data","access_indicators.RDS"))
+
+# RESTRICT analysis to only HH's that answered 'food recall::seafood' (n = 2125)
+# RENAME access variables for legibility ...
+access_df <- access_df %>% 
+  filter(!is.na(resp_h1500)) %>% 
+  rename(a1_technology = a1_tech_score, 
+         a2_capital = a2_pc1_exp, 
+         a3_markets = a3_marketaccess, 
+         a4_labor = a4_hrs_tot_hh_or_hired, 
+         a5_knowledge = a5_knowledge_cat, 
+         a6_authority = a6_authority_score, 
+         a7_identity = a7_canfish_hh_sum, # a7_canfish_hh_score
+         a8_relationships = a8_gifted_seafood_hh) %>% 
+  mutate(consumed_seafood_gp = if_else(consumed_seafood_qt == "high", "high", "not_high")) %>% 
+  mutate(hh_size = hh_size.x) %>% 
+  select(-c(hh_size.x,hh_size.y))
+
+access_vars <- c("a1_technology", "a2_capital", "a3_markets", "a4_labor",
+                 "a5_knowledge", "a6_authority", "a7_identity", "a8_relationships")
+
+varnames <- tibble(access_var = access_vars, 
+                   varname = c("technology","capital","markets","labor",
+                               "knowledge","authority","identity",
+                               "social relationships"))
+
+varnames
+```
+
+## Checks & correlations
+```{r}
+access_df %>% skim()
+
+# Check correlations
+# Predictors and household size
+png(here("MS_access","plots","corrplot_allvars.png"), 
+    height = 9, width = 9, res = 300,units = "in")
+
+access_df %>% 
+  select(hh_size,
+         all_of(access_vars)) %>% 
+  mutate(across(everything(), ~as.numeric(.))) %>%
+  cor(use = "pairwise.complete.obs", method = "spearman") %>% 
+  corrplot::corrplot(method = "color", addCoef.col = 'black', diag = F, 
+           tl.cex = .7, tl.col = "black",
+           number.cex = 0.7)
+
+dev.off()
+
+# just predictors
+png(here("MS_access","plots","corrplot_predictors.png"), 
+    height = 6, width = 6, res = 300,units = "in")
+
+access_df %>% 
+  select(all_of(access_vars)) %>% 
+  mutate(across(everything(), ~as.numeric(.))) %>%
+  cor(use = "pairwise.complete.obs", method = "spearman") %>% 
+  corrplot::corrplot(method = "color", addCoef.col = 'black', diag = F, 
+           tl.cex = .5, tl.col = "black",
+           number.cex = 0.5)
+dev.off()
+
+```
+
+
+# 1. Random Forest
+Global model of high / low seafood consumption households
+Which access variables best predict high / low seafood consumption.
+
+```{r}
+# 2146 -> 1058
+
+mod1_df <- access_df %>% 
+  select(interview__key,
+    consumed_seafood_qt,
+         all_of(access_vars)) %>%
+  column_to_rownames("interview__key") %>% 
+  drop_na() %>% 
+  mutate(a5_knowledge = as.numeric(a5_knowledge)) %>% 
+  mutate(a6_authority = as.numeric(a6_authority)) %>% 
+  filter(consumed_seafood_qt %in% c("low","high")) %>%  # uncomment for 3 classes
+  mutate(consumed_seafood_qt = factor(as.character(consumed_seafood_qt)))
+
+#1058
+mod1_df %>% skim()
+
+mod1_df %>% tabyl(consumed_seafood_qt) %>% adorn_totals()
+
+
+```
+
+### 1a. Random forest
+
+Load RF from paper
+```{r}
+mod1_rf <- read_rds(here("MS_access","Outputs","04-mod1_rf.RDS"))
+mod1_rf
+mod1_rf$finalModel
+
+```
+
+Generate RF - SKIP IF LOADED ABOVE
+```{r eval=FALSE, include=TRUE}
+set.seed(1986)
+
+rf_trControl = trainControl(
+   method = "repeatedcv",
+   number = 10,
+   repeats = 5, #5
+   savePredictions = "final"       # save predictions for the optimal tuning parameter
+)
+
+mod1_rf <- train(
+   consumed_seafood_qt ~ ., 
+   data = mod1_df, 
+   method = "rf",
+   ntree = 5000, # 5000
+   metric = "Accuracy",
+   tuneGrid = expand.grid(mtry = 2:3), # searching around mtry = sqrt(n_vars)
+   trControl = rf_trControl
+)
+
+mod1_rf # 0.76
+mod1_rf$finalModel
+
+# Save model 
+# NOTE: this will not be on github since it contains sensitive information
+mod1_rf %>% write_rds(here("MS_access","Outputs","04-mod1_rf.RDS"))
+
+```
+
+RF Stats
+
+```{r}
+mod1_rf
+mod1_rf$finalModel
+
+confusionMatrix(mod1_rf, mode = "everything", positive = "high")
+
+TP = mod1_rf$finalModel$confusion[1,1]
+FN = mod1_rf$finalModel$confusion[1,2]
+FP = mod1_rf$finalModel$confusion[2,1]
+TN = mod1_rf$finalModel$confusion[2,2]
+
+# Precision:
+# Precision is the measure of true positives over the number of total positives predicted by your model. The formula for precision can be written as: TP/(TP+FP). What this metric allows you to calculate is the rate of which your positive predictions are actually positive.
+
+mod1_precision = TP/(TP+FP) # 0.74122
+
+# Recall
+# Recall (a.k.a sensitivity) is the measure of your true positive over the count of actual  
+# positive outcomes. The formula for recall can be expressed as: TP/(TP+FN). 
+# *Using this formula, we can assess how well our model is able to identify the actual true 
+# result.*
+
+mod1_recall = TP/(TP+FN)   # 0.7509363
+
+# F1 score combines precision and recall into one metric. If precision and recall are both high, F1 will be high, too. If they are both low, F1 will be low. If one is high and the other low, F1 will be low. F1 is a quick way to tell whether the classifier is actually good at identifying members of a class, or if it is finding shortcuts (e.g., just identifying everything as a member of a large class).
+
+# Accuracy is measured as the total number of (TP + TN)/(All Cases), while a F1 score is calculated by 2*((precision*recall)/(precision + recall)), with precision = TP/(TP+FP), and recall = TP/(TP+FN).
+
+#F1 Score:
+#The F1 score is the harmonic mean between precision and recall. The formula for the F1 score can be expressed as: 2(p*r)/(p+r) where ‘p’ is precision and ‘r’ is recall. This score can be used as an overall metric that incorporates both precision and recall. The reason we use the harmonic mean as opposed to the regular mean, is that the harmonic mean punishes values that are further apart.
+
+# 0.7460465 (same as below)
+mod1_F1 = MLmetrics::F1_Score(mod1_rf$finalModel$predicted,
+                              mod1_df$consumed_seafood_qt, positive = "high") 
+
+
+mod1_F1 = 2*(mod1_precision*mod1_recall)/(mod1_precision+mod1_recall) # 0.7460465
+
+```
+
+
+RF Plots
+```{r}
+# error plot
+mod1_rf$finalModel$err.rate %>% 
+  as_tibble() %>% 
+  mutate(tree = seq(1:n())) %>% 
+  pivot_longer(cols = OOB:low, values_to = "error") %>% 
+  ggplot(aes(x = tree, y = error, colour = name))+
+  geom_line()
+
+ggsave(here("MS_access","plots","mod1_errorplot.png"), 
+       height = 4, width = 8) 
+
+print(mod1_rf$finalModel)
+plot(mod1_rf$finalModel)
+varImpPlot(mod1_rf$finalModel)
+
+mod1_rf_imp <- mod1_rf$finalModel$importance %>% 
+  as.data.frame() %>% 
+  rownames_to_column(var = "access_var") %>% 
+  as_tibble() %>% 
+  arrange(-MeanDecreaseGini)
+
+mod1_rf_imp_order <- c("markets","capital", "technology",
+                       "identity","labor", 
+                       "authority","knowledge",
+                       "social relationships")
+
+p1 <- mod1_rf_imp %>% 
+  mutate(access_var = recode(access_var, 
+                             "a8_relationships1" = "a8_relationships")) %>% 
+  left_join(varnames) %>% 
+  ggplot(aes(x = MeanDecreaseGini, y = reorder(varname, MeanDecreaseGini)))+
+  geom_bar(stat = "identity")+
+  ylab("")+xlab("importance")+
+  theme_bw()
+
+p1
+```
+
+### 1b. Boxplots of access variables
+- (Small, horizontal) boxplots of access variables, lined up with RF results
+
+```{r}
+access_scaled <- access_df %>% 
+  select(interview__key:island_village, consumed_seafood_qt,
+         all_of(access_vars)) %>% 
+  mutate(across(all_of(access_vars), ~as.numeric(.))) %>% 
+  mutate(across(all_of(access_vars), ~scale(.)))
+
+access_scaled
+
+# doesnt work to order; need to revert variable names
+# low seafood consumption
+p2 <- access_scaled %>% 
+  filter(consumed_seafood_qt %in% c("low","high")) %>% 
+  pivot_longer(cols = all_of(access_vars), names_to = "access_var", values_to = "std_score") %>% 
+  mutate(consumed_seafood_qt = factor(consumed_seafood_qt, levels = c("low","high"))) %>% 
+  left_join(varnames) %>% 
+  mutate(varname = factor(varname, levels = rev(mod1_rf_imp_order))) %>% 
+  ggplot(aes(y = std_score, x = varname, colour = consumed_seafood_qt))+
+  geom_quasirandom(dodge.width = 0.8, alpha = 0.05, varwidth = T)+
+  geom_boxplot(fill = "transparent")+
+  scale_colour_manual(values = cat_palette2[c(1,3)], 
+                      name = "seafood consumption category")+
+  xlab("")+ylab("standard score")+
+  coord_flip()+
+  theme_bw()+
+  theme(axis.text.y=element_blank(),
+        axis.ticks.y=element_blank())
+
+
+  
+png(here("MS_access","plots","fig3_mod1_varimp_boxplot.png"), 
+    height = 6, width = 11, res = 300,units = "in")
+
+ggpubr::ggarrange(p1, p2, labels = c("A", "B"), ncol = 2, widths = c(1.5,2), 
+                  common.legend = TRUE, legend = "bottom")
+
+dev.off()
+
+```
+
+
+### 1c. CART
+One tree - used for insights into whats going on 'under the hood' in the RF models - 
+not as a result.
+
+```{r}
+# more robust version of the above
+cart_trControl = trainControl(
+   method = "cv",
+   number = 10,
+   savePredictions = "final",       # save preds for the optimal tuning parameter
+   classProbs = TRUE,  # class probs in addition to preds
+   summaryFunction = twoClassSummary
+   )
+
+set.seed(1986)
+mod1b_cart <- train(
+   consumed_seafood_qt ~ .,  
+   data = mod1_df, 
+   method = "rpart",
+   tuneLength = 5,
+   tuneGrid = expand.grid(cp = seq(from = 0.006, to = 0.010, length = 6)),  
+   metric = "ROC",
+   trControl = cart_trControl
+   )
+
+plot(mod1b_cart)
+mod1b_cart
+rpart.plot(mod1b_cart$finalModel, yesno = T)
+
+```
+
+# 2. Clustering analysis - High seafood consumption households
+- 534 households
+- Need to log-transform highly skewed variables first (different than RF)
+
+```{r}
+library(dendextend)
+library(ComplexHeatmap)
+set.seed(1986)
+
+vars_numeric <- c("a1_technology","a2_capital","a3_markets","a4_labor","a7_identity")
+
+# vars need to be log-transformed, scaled.
+hsc <- access_df %>% 
+  select(interview__key:island_village, consumed_seafood_qt, all_of(access_vars)) %>%
+  mutate(a4_labor = log1p(a4_labor), 
+         a7_identity = log1p(a7_identity)) %>% 
+  mutate(a5_knowledge = as.numeric(a5_knowledge),
+         a6_authority = as.numeric(a6_authority) -1, 
+         a8_relationships = as.numeric(a8_relationships) -1) %>% 
+  mutate(across(all_of(access_vars), ~scale(., center = T, scale = T))) %>% 
+  filter(consumed_seafood_qt == "high") %>% 
+  left_join(access_df[c("interview__key", access_vars)], by = "interview__key", 
+            suffix = c("","_unscaled"))
+
+# where are they? all over (move this part)
+hsc %>% tabyl(island_village)
+
+# clustering analysis
+hsc_mat <- hsc %>% 
+  column_to_rownames(var = "interview__key") %>% 
+  select(all_of(access_vars)) %>%
+  rename_with(.fn = ~gsub("a\\d_","",.)) %>%  # remove numbers from access var labels
+  as.matrix()
+
+# clusters of access vars
+row_dend <- hsc_mat %>% t() %>% 
+  dist(method = "euclidean") %>% 
+  hclust(method = "ward.D2") # D2 vs. D here just flips the axis (clusters are unchanged)
+
+# clusters of households
+col_dend <- hsc_mat %>% 
+  dist(method = "euclidean") %>% 
+  hclust(method = "ward.D")
+
+# heatmap & clusters together
+my_cols <- colorRampPalette(c("#fff7fb","#a6bddb","#08306b"))(9)
+hsc_heatmap <- Heatmap(t(hsc_mat), name = "standard score", 
+        #col = brewer.pal(9, "BuPu"),
+        col = my_cols,
+        row_names_gp = gpar(fontsize = 8),
+        row_dend_width = unit(6, "mm"),
+        show_column_names = F,
+        cluster_rows = row_dend, 
+        cluster_columns = color_branches(col_dend, k = 6), 
+        column_dend_height = unit(10, "mm"),
+        heatmap_legend_param = list(direction = "horizontal"))
+
+hsc_heatmap
+
+png(here("MS_access","plots","mod1_highseafood_heatmap.png"), 
+    height = 4, width = 12, res = 600,units = "in")
+
+hsc_heatmap
+
+dev.off()
+
+```
+## Number of clusters
+- According to the majority rule, the best number of clusters is  3 (followed by 5, 10/2)
+
+Charrad et al. 2014 (NbClust Package)
+The user faces the dilemma of choosing one among several available solutions.There are two ways to deal with this problem. 
+
+- The first one is based on the majority rule, which is available in the NbClust package. The optimal number of clusters would be 4, as it is selected by 20 indices among 30, which is the correct number of clusters. 
+- The second option consists in considering only indices that performed best in simulation studies. For example, the 5 top performers in the Milligan and Cooper (1985) study are CH index, Duda index, Cindex, Gamma and Beale.
+
+```{r}
+library(factoextra)
+library(NbClust)
+#citation("NbClust")
+#?NbClust
+
+
+# all indices are not equal - validity of 'majority rule' is contested.
+# takes a minute to run 
+# res.nbclust <- NbClust(hsc_mat, diss = NULL, distance = "euclidean",
+#                   min.nc = 2, max.nc = 12, 
+#                   method = "ward.D2", index ="all") # 
+
+# final solution
+res.nbclust <- NbClust(hsc_mat, diss = NULL, distance = "euclidean",
+                   min.nc = 2, max.nc = 12, 
+                   method = "ward.D2", index ="dunn") # dunn = 6 clusters
+
+fviz_nbclust(res.nbclust) # 3 or 5 clusters; based on majority rule; dunn = 6 clusters
+res.nbclust$All.index # 26 indices used when index = 'all'
+
+```
+
+
+## Boxplots
+```{r}
+# how do households cluster based on the access mechanisms?
+# ~6 typologies of 'high seafood consumption' household
+# plot(col_dend)
+
+hsc_clusters <- cutree(col_dend, k = 6) %>% 
+  as.data.frame() %>% 
+  rownames_to_column(var = "interview__key") %>% 
+  rename("cluster_orig" = ".") %>% 
+  mutate("cluster" = case_when(cluster_orig == 3 ~ "1", 
+                               cluster_orig == 4 ~ "2", 
+                               cluster_orig == 1 ~ "3",
+                               cluster_orig == 5 ~ "4",
+                               cluster_orig == 2 ~ "5",
+                               cluster_orig == 6 ~ "6"))
+
+hsc_clust <- hsc %>% 
+  left_join(hsc_clusters, by = "interview__key") %>% 
+  #mutate(cluster_orig = factor(cluster_orig, levels =  c(3,4,1,5,2,6)))
+  mutate(cluster = factor(cluster, levels = c("1","2","3","4","5","6")))
+
+hsc_clust %>% tabyl(cluster)
+
+# boxplots of access variable score x cluster
+hsc_clust %>% 
+  select(interview__key, all_of(access_vars), cluster) %>% 
+  rename_with(.fn = ~gsub("a\\d_","",.)) %>%  # remove numbers from access var labels
+  pivot_longer(cols = -c(interview__key, cluster), names_to = "access_var") %>% 
+  ggplot(aes(x = access_var, y = value, colour = cluster))+
+  geom_boxplot(fill = "gray80", color = "gray20", size = 0.2, outlier.alpha = 0)+
+  geom_jitter(alpha = 0.2, size = .8, width = 0.3, height = 0)+
+  #geom_beeswarm(dodge.width = .01, height = 0, alpha = 0.2)+
+  facet_wrap(~cluster, nrow=1)+
+  theme_gov_dark()+
+  theme(legend.position = "none")+xlab("")+ylab("standard score")
+
+ggsave(here("MS_access","plots","mod1_cluster_boxplot.png"), height = 4, width = 10)
+
+
+# Boxplots - numeric access variables (instead of cluster)
+hsc_clust %>% 
+  select(interview__key, all_of(access_vars), cluster) %>% 
+  rename_with(.fn = ~gsub("a\\d_","",.)) %>%  # remove numbers from access var labels  
+  pivot_longer(cols = -c(interview__key, cluster), names_to = "access_var") %>% 
+  mutate(access_var = factor(access_var, levels = c("technology","labor","knowledge","relationships", 
+                                                       "capital","markets","authority","identity"))) %>% 
+  ggplot(aes(x = cluster, y = value, colour = cluster))+
+  geom_boxplot(fill = "gray80", color = "gray20", size = 0.2, outlier.alpha = 0)+
+  geom_jitter(alpha = 0.2, size = .8, width = 0.2, height = 0)+
+  facet_wrap(~access_var, nrow=1)+
+  theme_bw()+
+  theme(legend.position = "none")+xlab("cluster")+ylab("standard score")
+
+ggsave(here("MS_access","plots","mod1_cluster_boxplot_alt.png"), height = 3, width = 9)
+
+
+# a common legend
+hsc_clust %>% 
+  ggplot(aes(x = cluster, fill = cluster))+
+  geom_bar(stat = "count")+
+  scale_fill_discrete(labels=c("1. Large, high tech fishing households", 
+                               "2. More casual fishing households", 
+                               "3.  Small, older, low-authority households",
+                               "4.  Gifted households",
+                               "5.  Wealthy urban households",
+                               "6.  Low tech crabbers and purchasers"))+
+  theme(legend.position = "bottom")
+
+
+hsc_clust %>% tabyl(cluster) %>% 
+  kbl() %>%
+  kable_styling(full_width = F)
+
+
+# save hsc_cluster table
+write_rds(hsc_clust,here("MS_access","outputs","04_hsc_clust.RDS"))
+
+```
+
+## Location
+Island/village
+Urban/rural
+Development status
+
+```{r}
+hsc_clust
+
+cluster_loc <- hsc_clust %>% 
+  left_join(access_df %>% select(interview__key, rururb, 
+                                 island_development_status, population_2020))
+
+cluster_p1 <- cluster_loc %>% 
+  group_by(island_village, cluster) %>% 
+  summarise(n_hh = n()) %>% 
+  left_join(village_tbl) %>% 
+  ggplot(aes(x = reorder(island_village,vlg_order), y = n_hh, fill = cluster))+
+  geom_bar(stat = "identity")+
+  guides(fill = guide_legend(nrow = 1))+
+  xlab("")+
+  theme_gov_dark()+  
+  theme(strip.text.x = element_blank(), 
+        axis.text = element_text(size = 8))+
+  facet_grid(cols = vars(region), scales = "free_x", space = "free_x")
+  
+
+cluster_p2 <- cluster_loc %>% 
+  select(island_village, island_development_status) %>% 
+  distinct() %>%
+  left_join(village_tbl) %>% 
+  ggplot(aes(x= reorder(island_village,vlg_order), fill = island_development_status))+
+  geom_bar(width = 1)+
+  scale_fill_brewer(palette = "Greys")+
+  ylab("")+
+  theme_gov_dark()+
+  theme(axis.text.x = element_blank(),
+        axis.title.x = element_blank(),
+        axis.text.y = element_text(colour = "white", size = 4), 
+        axis.ticks.y = element_line(colour = "white"),
+        axis.ticks.x = element_line(colour = "gray"),
+        legend.position = "top",
+        strip.text = element_text(size = 10),
+        strip.background = element_rect(colour = "gray80", fill = "white"))+
+  facet_grid(cols = vars(region), scales = "free_x", space = "free_x")
+
+png(here("MS_access","plots","cluster_byvillage.png"), 
+    height = 7.5, width = 17, res = 300,units = "in")
+
+ggpubr::ggarrange(cluster_p2, cluster_p1, labels = c("A", "B"), nrow = 2, heights = c(1,4))
+
+dev.off()
+
+cluster_loc %>% 
+  group_by(rururb, cluster) %>% 
+  summarise(n_hh = n()) %>% 
+  ggplot(aes(x = rururb, y = n_hh, fill = cluster))+
+  geom_bar(stat = "identity")+
+  theme_gov_dark()
+
+cluster_loc %>% 
+  group_by(island_development_status, cluster) %>% 
+  summarise(n_hh = n()) %>% 
+  ggplot(aes(x = island_development_status, y = n_hh, fill = cluster))+
+  geom_bar(stat = "identity")+
+  theme_gov_dark()
+
+
+
+cluster_loc %>% 
+  group_by(island, cluster) %>% 
+  summarise(n_hh = n()) %>% 
+  ggplot(aes(x = island, y = n_hh, fill = cluster))+
+  geom_bar(stat = "identity")+
+  theme_gov_dark()
+
+
+cluster_loc %>% 
+  group_by(island, cluster) %>% 
+  summarise(n_hh = n()) 
+
+cluster_loc %>% 
+  tabyl(island, cluster) %>% tibble::view()
+
+cluster_loc %>% 
+  tabyl(island_village, cluster) %>% tibble::view()
+
+c = 5
+cluster_loc %>% 
+  filter(cluster == c) %>% 
+  distinct(island_village) %>% 
+  nrow()
+
+cluster_loc %>% 
+  filter(cluster == c) %>% 
+  distinct(island) %>% 
+  nrow()
+
+
+```
+
+
+## Demographics
+For each group, check/summarize: 
+- Island & village - DONE
+- Urban / rural - DONE
+- “Development status” (hi, med, lo) - DONE
+- Gender composition of households - DONE
+-- Ratio of adult male::adult female - DONE
+- Age (median? min/max? skewness?) - DONE
+-- Ratio of children to adults? (similar to how we could do age, but could show something different. Age could be like a kind of aggregate age of the household– thru median or mean– and ratio could be a kind of measure of dependents to household contributors?) (ratio of kids <15 : anyone 15+) - DONE
+- Overall household size - DONE
+- (Max) Household education level (not sure best metric) - DONE
+
+```{r}
+# age distribution
+age_tbl <- id_tbl %>% 
+  group_by(interview__key) %>% 
+  summarise(age_skew = moments::skewness(age, na.rm=T), 
+            age_median = median(age, na.rm=T), 
+            age_mean = mean(age, na.rm=T),
+            age_min = min(age, na.rm = T), 
+            age_max = max(age, na.rm = T), 
+            age_range = age_max - age_min, 
+            hh_size = n())
+  
+age_tbl$age_skew %>% hist()
+age_tbl$age_median %>% hist()
+age_tbl$age_mean %>% hist()
+age_tbl$age_range %>% hist()
+
+ggplot(age_tbl, aes(x = hh_size, y = age_skew, colour = age_median, size = age_range))+
+  geom_point(alpha = 0.5)+
+  scale_color_viridis_c(direction = -1)+
+  theme_bw()
+
+# gender composition of adults (>= 15yo)
+gender_tbl <- id_tbl %>% 
+  filter(age >= 15) %>% 
+  group_by(interview__key, sex) %>% 
+  summarise(n_adults = n()) %>% 
+  pivot_wider(names_from = sex, values_from = n_adults) %>% 
+  rename(adult_females = Female, adult_males = Male) %>%
+  mutate(across(c(adult_females, adult_males), ~replace_na(., 0))) %>% 
+  mutate(n_adults = adult_females+adult_males, 
+         gender_valence = -1*adult_males + adult_females,
+         gender_ratio = gender_valence / n_adults)
+
+gender_tbl
+
+# gender valence: 
+# more negative: hh is more male-weighted
+# more positive: hh is more female-weighted
+gender_tbl$gender_valence %>% hist()
+
+# gender ratio: 
+# 100% male = -1, 100% female = +1
+gender_tbl$gender_ratio %>% hist() 
+
+
+ggplot(gender_tbl, aes(x = gender_valence, y = gender_ratio, 
+                       size = n_adults, colour = gender_valence))+
+  geom_point(alpha = 0.5)+
+  scale_color_viridis_c(direction = -1)+
+  theme_bw()
+
+# youth-ness of household
+youth_tbl <- id_tbl %>% 
+  mutate(age_category = case_when(is.na(age) ~ NA_character_, 
+                                  age < 15 ~ "child", 
+                                  age >= 15 ~ "adult")) %>% 
+  group_by(interview__key, age_category) %>% 
+  summarise(n_agecat = n()) %>% 
+  pivot_wider(names_from = age_category, values_from = n_agecat) %>% 
+  rename(n_adults = adult, n_children = child) %>% 
+  mutate(across(c(n_adults, n_children), ~replace_na(., 0))) %>% 
+  mutate(hh_size = n_adults+n_children, 
+         age_valence = -1*n_children + n_adults,
+         age_ratio = age_valence / hh_size, 
+         frac_child = n_children/hh_size)
+
+
+youth_tbl
+
+youth_tbl$age_ratio %>% hist()
+youth_tbl$age_valence %>% hist()
+
+# frac_child: # of children < 15 / household size
+# age_ratio: -1 to +1. 1 = all adult, -1 = all children. Similar to age_frac_child
+# age_valence: n_adults - n_children. How 'child heavy' or 'adult heavy' is a hh.
+
+ggplot(youth_tbl, aes(x = age_ratio, y = frac_child,
+                      colour = n_adults, 
+                      size = n_children))+
+  geom_point(alpha = 0.5)+
+  scale_color_viridis_c(direction = -1)+
+  theme_bw()
+
+
+age_tbl
+youth_tbl
+gender_tbl
+
+```
+
+Join to cluster table; get demographic info by cluster group.
+```{r}
+cluster_demo <- access_df %>% 
+  select(interview__key, island_village,
+         rururb, island_development_status, population_2020, resp_h1500,
+         max_edu_level) %>% 
+  left_join(age_tbl) %>% 
+  left_join(youth_tbl %>% select(-hh_size)) %>% 
+  left_join(gender_tbl %>% select(-n_adults)) %>% 
+  left_join(hsc_clust %>% select(interview__key, cluster)) %>% 
+  filter(!is.na(cluster)) %>% 
+  mutate(population_2020_log = log1p(population_2020))
+  
+
+cluster_demo %>% 
+  select(cluster, where(is.numeric), -resp_h1500) %>% 
+  pivot_longer(-cluster) %>% 
+  ggplot(aes(x = cluster, y = value, colour = cluster))+
+  geom_boxplot()+
+  facet_wrap(~name, ncol = 6, scales = "free")
+
+ggsave(here("MS_access","plots","cluster_demographics.png"), 
+       height = 6, width = 13) 
+
+# demo - select
+cluster_demo %>% 
+  select(cluster, where(is.numeric), -resp_h1500) %>% 
+  pivot_longer(-cluster) %>% 
+  filter(name %in% c("population_2020_log", "hh_size", 
+                     "age_mean", "age_range", "frac_child",
+                     "gender_ratio")) %>% 
+  ggplot(aes(x = cluster, y = value, colour = cluster))+
+  geom_boxplot()+
+  facet_wrap(~name, ncol = 3, scales = "free")
+
+ggsave(here("MS_access","plots","cluster_demographics_sm.png"), 
+       height = 6, width = 13) 
+
+# education
+cluster_demo %>% 
+  group_by(cluster, max_edu_level) %>% 
+  summarise(n_hh = n()) %>% 
+  mutate(max_edu_num = as.numeric(max_edu_level)-1) %>% 
+  ggplot(aes(x = cluster, y = n_hh, fill = max_edu_level))+
+  geom_bar(stat = "identity")
+
+cluster_demo %>% 
+  group_by(cluster, max_edu_level) %>% 
+  summarise(n_hh = n()) %>% 
+  mutate(max_edu_num = as.numeric(max_edu_level)-1) %>% 
+  ggplot(aes(x = cluster, y = max_edu_num))+
+  geom_boxplot()
+
+
+```
+
+## Proportion seafood consumed x acquisition x cluster
+
+```{r}
+
+cluster_pr <- hsc_clust %>% 
+  select(interview__key, cluster) %>% 
+  left_join(access_df %>% select(interview__key, ends_with("_pr"))) %>% 
+  pivot_longer(cols = ends_with("_pr"), names_to = "category", values_to = "proportion")
+
+cluster_p3 <- cluster_pr %>% 
+  ggplot(aes(x = interview__key, y = proportion, fill = category))+
+  geom_bar(stat = "identity", width = 1)+
+  #scale_fill_npg()+ # library("ggsci")
+  xlab("household_id")+
+  facet_wrap(~cluster, ncol = 1, scales = "free_x")+
+  theme_bw()+
+  theme(legend.position = "bottom", 
+        axis.text.x = element_blank())
+
+cluster_p3
+ggsave(here("MS_access","plots","cluster_acquistion.png"), 
+       height = 7.5, width = 17) 
+
+cluster_p4 <- cluster_pr %>% 
+  ggplot(aes(x = category, y = proportion, group = category, colour = category))+
+  geom_boxplot()+
+  facet_wrap(~cluster, ncol = 1)+
+  theme_bw()+ xlab("")+
+  theme(legend.position = "bottom",
+        axis.text.x = element_blank())
+
+png(here("MS_access","plots","cluster_acquistion2.png"), 
+    height = 7, width = 17, res = 300,units = "in")
+
+ggpubr::ggarrange(cluster_p3, cluster_p4, labels = c("A", "B"), 
+                  ncol = 2, widths = c(5,1),
+                  common.legend = T, legend = "bottom")
+
+dev.off()
+
+```
+
+## Types of seafood consumed by cluster, and by 'primary means of acquisition'
+- are higher fishing households eating more diverse seafoods? 
+- which clusters are 
+
+```{r}
+# copied from 03...
+# removed both types of 'other fish' - low #s and not informative here.
+# NOTE we keep "canned, processed, dried (to include things like dried fish, seaworms), but exlude possible 
+# imports (tinned mackerel, tinned tuna)
+h1503 <- food_recall %>%
+  filter(coicop_class == "Fish and sea food",
+         beneficiary == "this household",
+         !coicop %in% c("113023005", "113023015", "Seaweed","Tinned Mackerel","Tinned Tuna",
+                        "Other Fish", 
+                        "Other Live, Fresh, Chilled Or Frozen Seafood (Incl. Sea Hares, Turtles...)")) %>% 
+  select(interview__key, coicop_class, coicop_subclass, coicop, qty_gram_new, type) %>% 
+  mutate(fish_type = case_when(str_detect(coicop, "Crab") ~ "Crab", 
+                               str_detect(coicop, "Deep Sea") ~ "Deep-sea fish", 
+                               str_detect(coicop, "Dried") ~ "Canned, processed, or dried fish", 
+                               str_detect(coicop, "Pelagic") ~ "Pelagic fish", 
+                               str_detect(coicop, "Sandflat") ~ "Lagoon and sandflat fish", 
+                               str_detect(coicop, "Reef Fish") ~ "Reef fish",
+                               str_detect(coicop, "Muscles") ~ "Mussels, clams, oysters, etc",
+                               str_detect(coicop, "Snails") ~ "Sea snails",
+                               str_detect(coicop, "Octopus") ~ "Octopus, squid",
+                               TRUE ~ coicop)) %>% 
+  mutate(fish_type = factor(fish_type, levels = c("Deep-sea fish", "Pelagic fish",
+                                                  "Reef fish","Lagoon and sandflat fish",
+                                                  "Shark", "Octopus, squid", "Lobster", 
+                                                  "Canned, processed, or dried fish",
+                                                  "Crab", "Mussels, clams, oysters, etc", "Cockles", "Sea snails"
+                                                  )))
+
+h1503 %>% tabyl(coicop)
+h1503 %>% tabyl(fish_type)
+         
+clust_seafood <- hsc_clust %>% 
+  select(interview__key, cluster) %>% 
+  left_join(h1503, by = "interview__key")
+
+
+clust_seafood %>%
+  mutate(coicop_id = str_trunc(fish_type, width = 45, ellipsis = ""), 
+         qty_grams_lim = if_else(qty_gram_new >= 75e+3, 75e+3, qty_gram_new), 
+         max_qty = if_else(qty_grams_lim == 75e+3, 75e+3, NA_real_)) %>% 
+  ggplot(aes(x = cluster, y = qty_grams_lim, colour = cluster))+
+  geom_boxplot()+
+  geom_point(aes(y = max_qty), color = "gray60")+
+  geom_hline(yintercept = 75e+3, lty = 3, lwd = 0.1)+
+  #scale_x_discrete(label = function(x) stringr::str_trunc(x, 3, ellipsis = "")) +  
+  facet_wrap(~coicop_id, nrow = 3)+
+  ylab("quantity (grams)")+
+  theme_bw()+
+  theme(strip.text= element_text(size = 7),
+        legend.position = "none")
+  
+ggsave(here("MS_access","plots","cluster_seafood_cons.png"), width = 10, height = 6)
+
+
+
+# all households; all seafood, by island
+h1503 %>% 
+  left_join(access_df, by  = "interview__key") %>% 
+  left_join(village_info[c("island_village","region")], by = "island_village") %>% 
+  mutate(reg_island = if_else(region == "gilbert_islands","gb","ln"), 
+         reg_island = str_c(reg_island, tolower(island), sep = "_")) %>% 
+  mutate(coicop_id = str_trunc(coicop, width = 15, ellipsis = ""), 
+         qty_grams_lim = if_else(qty_gram_new >= 75e+3, 75e+3, qty_gram_new), 
+         max_qty = if_else(qty_grams_lim == 75e+3, 75e+3, NA_real_)) %>% 
+  ggplot(aes(x = coicop_id, y = qty_grams_lim, colour = coicop))+
+  geom_boxplot()+
+  geom_point(aes(y = max_qty), color = "gray60")+
+  geom_hline(yintercept = 75e+3, lty = 3, lwd = 0.1)+
+  geom_boxplot()+
+  facet_wrap(~reg_island, ncol = 3)+
+  theme_gov_dark()+
+  theme(legend.position = "right")
+
+```
+
+## Teeraina:
+- Are they eating mostly imported seafood? 
+- Lots of home production. What are they eating?
+
+- Lots of home production (fig s15), but not a lot of ‘fishing hours’. Gleaning households? Weirs?
+- They’re eating local seafood (see below), via purchase, gift, and home production
+- But, the QTY from home production is much higher
+
+
+```{r}
+trna <- access_df %>% 
+  filter(island == "Teeraina", 
+         consumed_seafood_bought_qt == "high")
+
+trna # 23 high seafood consumption hh's in Teeraina
+
+trna_seafood <- h1503 %>% 
+  filter(interview__key %in% trna$interview__key) 
+
+trna_seafood %>% tabyl(coicop, type)
+
+trna_seafood %>% 
+  ggplot(aes(x = type, y = qty_gram_new))+
+  geom_boxplot()
+
+
+trna_seafood %>% 
+  filter(type == "Home production") %>% 
+  ggplot(aes(x = coicop, y = qty_gram_new))+
+  geom_boxplot()
+
+```
+
+
+## Group 6 - low tech crabbers / purchasers (purple)
+- Are they eating mostly imported seafood? 
+- Lots of home production. What are they eating?
+
+- Lots of home production (fig s15), but not a lot of ‘fishing hours’. Gleaning households? Weirs?
+- They’re eating local seafood (see below), via purchase, gift, and home production
+- But, the QTY from home production is much higher
+
+```{r}
+purp <- hsc_clust %>% 
+  select(interview__key, cluster) %>% 
+  left_join(access_df, by = "interview__key") %>% 
+  filter(cluster == "6")
+
+
+
+# (h1503 is loaded above)
+purp_seafood <- h1503 %>% 
+  filter(interview__key %in% purp$interview__key) 
+
+purp_seafood %>% tabyl(coicop, type)
+
+purp_seafood %>% 
+  ggplot(aes(x = type, y = qty_gram_new))+
+  geom_boxplot()
+
+
+purp_seafood %>% 
+  filter(type == "Home production") %>% 
+  ggplot(aes(x = coicop, y = qty_gram_new))+
+  geom_boxplot()+
+  theme_gov_dark()
+
+
+purp_pr <- purp %>% 
+  pivot_longer(cols = ends_with("_pr"), names_to = "category", values_to = "proportion")
+
+purp_pr %>% 
+  ggplot(aes(x = reorder(interview__key, proportion), y = proportion, fill = category))+
+  geom_bar(stat = "identity", width = 1)+
+  #scale_fill_brewer(palette = "Accent")+
+  xlab("household_id")+
+  facet_wrap(~cluster, ncol = 1)+
+  theme_bw()+
+  theme(legend.position = "bottom", 
+        axis.text.x = element_blank())
+
+# classify purple households by primary mode of acquisition
+purp_cat <- purp_pr %>% 
+  select(interview__key, category, proportion) %>% 
+  group_by(interview__key) %>% 
+  summarise(max_prop  = max(proportion, na.rm = T), 
+            consumption_cat = category[proportion == max_prop]) %>% 
+  separate(consumption_cat, c(NA, NA, "consumption_cat", NA), sep = "_")
+
+
+# by main category of hh seafood acquisiton: (facet / panel) - what are people eating and how are they getting it? 
+purp_seafood %>% 
+  left_join(purp_cat, by = "interview__key") %>% 
+  ggplot(aes(x = type, y = qty_gram_new))+
+  geom_boxplot()+
+  facet_wrap(~consumption_cat)+
+  theme_gov_dark()
+
+purp_seafood %>% 
+  left_join(purp_cat, by = "interview__key") %>%
+  ggplot(aes(x = coicop, y = qty_gram_new))+
+  geom_boxplot()+
+  facet_wrap(~consumption_cat, nrow = 3)+
+  theme_gov_dark()
+
+purp_seafood %>% 
+  left_join(purp_cat, by = "interview__key") %>%
+  ggplot(aes(x = coicop, y = qty_gram_new))+
+  geom_boxplot()+
+  facet_grid(consumption_cat~type)+
+  theme_gov_dark()
+
+# where is purple group located? 
+hsc_clust %>% 
+  filter(cluster == "6") %>%  
+  ggplot(aes(x = reorder(island, a3_markets), y = a3_markets, group = island, colour = island))+
+  ggbeeswarm::geom_beeswarm(groupOnX = T, priority = "density", cex = .5)+
+  theme_gov()
+
+purp %>% 
+  left_join(village_info[c("island_village","region")]) %>% 
+  tabyl(region)
+
+
+```
+
+purple subgroups
+```{r}
+# purple subgroups ----
+purp_clusters <- cutree(col_dend, k = 30) %>% 
+  as.data.frame() %>% 
+  rownames_to_column(var = "interview__key") %>% 
+  rename("purp_cluster" = ".") %>% 
+  left_join(purp) %>% 
+  filter(cluster == 6)
+
+purp_clusters %>% 
+  ggplot(aes(x = purp_cluster, y = a3_markets, group = purp_cluster))+
+  geom_boxplot()
+
+purp_clusters %>% tabyl(island, purp_cluster)
+
+# what is purple group eating? by island, sub-cluster
+purp_clusters %>% 
+  left_join(h1503, by = "interview__key") %>% 
+  # add null values so all possible coicop values appear on plots
+  bind_rows(tibble(coicop = unique(h1503$coicop), purp_cluster = 29, island = "Abaiang")) %>% 
+  mutate(coicop_id = str_trunc(coicop, width = 35)) %>% 
+  ggplot(aes(x = coicop_id, y = qty_gram_new, fill = island))+
+  ggbeeswarm::geom_beeswarm(groupOnX = T, priority = "density", cex = .5, 
+                            size = 1, colour = "gray30", pch = 21)+
+  facet_grid(island ~ purp_cluster)+
+  theme_gov()+
+  theme(legend.position = "none")
+
+purp_clusters %>% 
+  left_join(h1503, by = "interview__key") %>% 
+  # add null values so all possible coicop values appear on plots
+  bind_rows(tibble(coicop = unique(h1503$coicop), purp_cluster = 29)) %>% 
+  mutate(coicop_id = str_trunc(coicop, width = 35)) %>% 
+  ggplot(aes(x = coicop_id, y = qty_gram_new))+
+  geom_boxplot(alpha = 0.3, fill = "gray30")+
+  ggbeeswarm::geom_beeswarm(groupOnX = T, priority = "density", cex = .5, size = 1)+
+  facet_wrap(~purp_cluster, nrow = 4)+
+  theme_gov()+xlab("")
+
+purp_clusters %>% 
+  left_join(h1503, by = "interview__key") %>% 
+  filter(type %in% c("Home production")) %>% 
+  # add null values so all possible coicop values appear on plots
+  bind_rows(tibble(coicop = unique(h1503$coicop), purp_cluster = 29)) %>% 
+  mutate(coicop_id = str_trunc(coicop, width = 35)) %>% 
+  ggplot(aes(x = coicop_id, y = qty_gram_new))+
+  geom_boxplot(alpha = 0.3, fill = "gray30")+
+  ggbeeswarm::geom_beeswarm(groupOnX = T, priority = "density", cex = .5, size = 1)+
+  facet_wrap(~purp_cluster, nrow = 4)+
+  theme_gov()+xlab("")
+
+```
+## Group 3 / Small, older (green)
+
+```{r}
+# purple subgroups ----
+g2_clusters <- cutree(col_dend, k = 12) %>% 
+  as.data.frame() %>% 
+  rownames_to_column(var = "interview__key") %>% 
+  rename("sub_cluster" = ".") %>% 
+  mutate(sub_cluster = factor(sub_cluster, levels = c(10,1,9))) %>% 
+  left_join(hsc_clust) %>% 
+  left_join(village_info[c("island_village","rururb","island_development_status")]) %>% 
+  filter(cluster == 3)
+
+g2_clusters %>% 
+  ggplot(aes(x = sub_cluster, y = a3_markets, group = sub_cluster))+
+  geom_boxplot()
+
+g2_clusters %>% 
+  ggplot(aes(x = sub_cluster, y = a4_labor, group = sub_cluster))+
+  geom_boxplot()
+
+g2_clusters %>% 
+  ggplot(aes(x = sub_cluster, y = a8_relationships, group = sub_cluster))+
+  geom_beeswarm(width = 0.1)
+
+g2_clusters %>% 
+  ggplot(aes(x = sub_cluster, fill = rururb))+
+  geom_bar(position = "fill")
+
+g2_clusters %>% 
+  ggplot(aes(x = sub_cluster, fill = island_development_status))+
+  geom_bar(position = "fill")+ylab("pct")
+
+g2_clusters  %>% 
+  select(island, a3_markets, a4_labor, a8_relationships, sub_cluster) %>% 
+  pivot_longer(a3_markets:a8_relationships, names_to = "access_var", values_to = "score") %>% 
+  ggplot(aes(x = island, y = score, colour = island))+
+  ggbeeswarm::geom_beeswarm(groupOnX = T, priority = "density", cex = .5)+
+  geom_hline(yintercept = 0, lty = 2, alpha = .6)+
+  facet_grid(access_var~ sub_cluster)+
+  theme_gov_dark()
+```
+
+
+## Group 4 / Giftees (Teal)
+- VRS: who gives / receives seafood? 
+- VRS4_39a, VRS4_39b, and VRS4_39c to
+
+```{r}
+
+# any kind of finfish, nonfinfish seafood, or non-fish foods
+# who receives food? 
+
+gifting <- vrs_share %>% 
+  select(interview__key, starts_with("catch_receiver"), "receiver_other") %>% 
+  rename(local_authorities = catch_receiver__1, 
+         relatives_outside_hh = catch_receiver__2, 
+         disadvantaged = catch_receiver__3, 
+         others = catch_receiver__4) %>% 
+  pivot_longer(-c(interview__key, receiver_other), names_to = "receiver", values_to = "response") %>% 
+  filter(response == 1) %>% 
+  mutate(receiver_other = if_else(receiver == "others", receiver_other, "")) %>% 
+  left_join(vrs_tbl, by = "interview__key") %>% 
+  distinct(across(-interview__key)) %>% 
+  select(island, island_village, receiver, receiver_other) %>% 
+  drop_na(island_village)
+
+gifting %>% 
+  select(island_village, receiver, receiver_other) %>% 
+  arrange(island_village) %>% 
+  kbl() %>%
+  kable_styling(full_width = F)
+
+# number of villages that participate in gifting: 
+village_tbl %>% 
+  left_join(gifting[c("island_village","receiver")]) %>% 
+  select(island_village, receiver) %>% 
+  pivot_longer(-island_village, names_to = "receiver", values_to = "rec_cat") %>% 
+  group_by(island_village) %>% 
+  summarise(n_resp = sum(!is.na(rec_cat))) %>% 
+  tabyl(n_resp) %>% 
+  adorn_totals()
+
+# number of villages per gifting category
+gifting %>% 
+  tabyl(island_village, receiver) %>% 
+  distinct() %>% 
+  adorn_totals()
+
+# who is in the 'others' category? 
+# 'other' responses
+# Most are 'relatives outside of household' or religious professionals
+
+gifting %>% 
+  filter(receiver == "others") %>% view()
+
+
+# Make a figure by island_village.
+village_tbl %>% 
+  left_join(gifting[c("island_village","receiver","receiver_other")]) %>% 
+  distinct(region, island_village, receiver) %>%
+  mutate(receive_yn = factor(if_else(is.na(receiver), 0, 1)),
+         receiver = replace_na(receiver, "unknown")) %>% 
+  rename(recipient = receiver) %>% 
+  ggplot(aes(x = island_village, y = recipient, size = receive_yn, colour = recipient))+
+  geom_point()+
+  scale_size_manual(values = c(0,2))+
+  theme_gov_dark()+ylab("")
+
+ggsave(here("MS_access","plots","gifting_byvillage.png"), width = 12, height = 5)
+
+# number of villages that participate in some form of gifting
+village_tbl %>% 
+  left_join(gifting[c("island_village","receiver","receiver_other")]) %>% 
+  filter(island_village %in% unique(vrs$island_village)) %>% 
+  distinct(region, island_village, receiver) %>%
+  mutate(receive_yn = factor(if_else(is.na(receiver), 0, 1)),
+         receiver = replace_na(receiver, "unknown")) %>% 
+  distinct(island_village, receive_yn) %>% 
+  tabyl(receive_yn)
+
+
+# 87/109 villages surveyed in VRS 
+
+```
+
+
+# 3. Map 
+- Map of islands and villages surveyed (grey), included in analysis (colored), 
+- Size: # of households surveyed (alt: population size)
+
+```{r}
+library(sf)
+library(ggplot2)
+library(ggrepel)
+library(ggsflabel)
+library(ggmap)
+
+world <- read_sf(here("PR_mapping","map_data","WB_Countries_Admin0_10m",
+             "WB_countries_Admin0_10m.shp"))
+
+vlg_sf <- village_info %>% 
+  mutate(population_2020_log = log1p(population_2020)) %>% 
+  st_as_sf(crs = 4326, 
+           coords = c("lon", "lat"), 
+           remove = F)
+
+isl_sf <- vlg_sf %>% 
+  select(island, region, lon, lat) %>% 
+  distinct(island, .keep_all = T)
+
+map_cols <- rev(brewer.pal(8,"Spectral"))
+depth_cols <- rev(brewer.pal(8,"BuPu"))
+bbox1 <- vlg_sf %>% filter(region == "gilbert_islands") %>% st_bbox()
+bbox2 <- vlg_sf %>% filter(region == "line_islands") %>% st_bbox()
+
+sf_use_s2(FALSE)
+kir1 <- world %>% st_crop(bbox1)
+kir2 <- world %>% st_crop(bbox2)
+
+# map tiles (not in use)
+# map1_bg <- ggmap(get_map(location =  c(bbox1[[1]],bbox1[[2]],bbox1[[3]],bbox1[[4]])))
+# map2_bg <- get_map(location =  c(bbox2[[1]],bbox2[[2]],bbox2[[3]],bbox2[[4]]))
+
+# add bathymetry (test!)
+library(maps)
+library(mapdata)
+library(marmap)
+library(stars) #rasters
+
+kir1_bathy <- getNOAA.bathy(lon1 = bbox1[1]-1, lon2 = bbox1[3]+1, 
+                            lat1 = bbox1[2]-1, lat2 = bbox1[4]+1, resolution = 1)
+
+kir1_bathy_sf <- as.SpatialGridDataFrame(kir1_bathy) %>% 
+  as('SpatialPolygonsDataFrame') %>% 
+  st_as_sf() %>% 
+  st_transform(crs = 4326) %>% 
+  rename(depth_m = layer) 
+
+# convert to raster, and back to data frame for plotting
+kir1_bathy_rast <- stars::st_rasterize(kir1_bathy_sf) %>% 
+    as.data.frame(depth_m, xy = TRUE)
+#test
+ggplot()+
+  geom_raster(data = kir1_bathy_rast, aes(x = x, y = y, fill = depth_m))
+
+# Alt (contour plot)
+kir1_bathy_contour <- stars::st_rasterize(kir1_bathy_sf) %>% 
+   stars::st_contour()
+
+ggplot()+
+   geom_sf(data = kir1_bathy_contour)
+
+kir2_bathy <- getNOAA.bathy(lon1 = bbox2[1]-1, lon2 = bbox2[3]+1, 
+                            lat1 = bbox2[2]-1, lat2 = 6, resolution = 1)
+
+kir2_bathy_sf <- as.SpatialGridDataFrame(kir2_bathy) %>% 
+  as('SpatialPolygonsDataFrame') %>% 
+  st_as_sf() %>% 
+  st_transform(crs = 4326) %>% 
+  rename(depth_m = layer) 
+
+# convert to raster, and back to data frame for plotting
+kir2_bathy_rast <- stars::st_rasterize(kir2_bathy_sf) %>% 
+  as.data.frame(depth_m, xy = TRUE)
+
+kir2_bathy_contour <- stars::st_rasterize(kir2_bathy_sf) %>% 
+   stars::st_contour()
+
+
+brks <- c(0,50,100,200,400,800,2000,4000,8000,16000)
+map1 <- vlg_sf %>% 
+  filter(region == "gilbert_islands") %>% 
+  ggplot()+
+  geom_raster(data = kir1_bathy_rast, aes(x = x, y = y, fill = depth_m))+
+  geom_sf(data = kir1_bathy_contour, fill = 'transparent', lwd = 1e-20, color = "grey20")+
+  geom_sf(data = world, color = "gray30",fill = "gray30", lwd = 300)+  
+  geom_sf(size = 2.2, lwd = 0.05, color = "black", shape = 19, alpha = 1)+
+  geom_sf(aes(colour = population_2020), size = 2,
+          shape = 19, alpha = 0.8)+
+  scale_colour_gradientn(trans="log", breaks=brks, labels=brks, colours = map_cols,
+                       guide = "colourbar", name = "Population")+
+  geom_sf_label_repel(data = isl_sf, aes(label = island), seed = 1986, alpha = 0.85, color = "black",
+                      segment.color = "gray20", min.segment.length = 0, force = 5, force_pull = 0.01,
+                      nudge_x = 0.6, nudge_y = 0.15)+
+  scale_x_continuous(limits = c(172.5, 177), expand = c(0,0))+
+  scale_y_continuous(limits = c(-3, 3.5), expand = c(0,0))+
+  theme_classic()+xlab("")+ylab("")
+
+map2 <- vlg_sf %>% 
+  filter(region == "line_islands") %>% 
+  ggplot()+
+  geom_raster(data = kir2_bathy_rast, aes(x = x, y = y, fill = depth_m))+
+  geom_sf(data = kir2_bathy_contour, fill = 'transparent', lwd = 1e-20, color = "grey20")+
+  geom_sf(data = world, color = "gray30",fill = "gray30", lwd = 200)+
+  geom_sf(size = 2.2, lwd = 0.05, color = "black", shape = 19, alpha = 1)+
+  geom_sf(aes(colour = population_2020), size = 2, lwd = 0.05, 
+          shape = 19, alpha = 0.8)+
+  scale_colour_gradientn(trans="log", breaks=brks, labels=brks, colours = map_cols,
+                       guide = "colourbar", name = "Population")+
+  geom_sf_label_repel(data = isl_sf, aes(label = island), seed = 1986, alpha = 0.85, color = "black",
+                      segment.color = "gray20", min.segment.length = 0, force = 5, force_pull = 0.01,
+                      nudge_x = 0.6, nudge_y = 0.15)+
+  scale_x_continuous(limits = c(-160.5, -157.1), expand = c(0,0))+
+  scale_y_continuous(limits = c(1, 6), expand = c(0,0))+
+  theme_classic()+xlab("")+ylab("")
+
+png(here("MS_access","plots","fig1_map.png"), 
+    height = 6, width = 10, res = 600,units = "in")
+
+ggpubr::ggarrange(map1, map2, labels = c("A", "B"), ncol = 2, widths = c(1,1),
+                  common.legend = T, legend = "right")
+
+dev.off()
+```
+
+
