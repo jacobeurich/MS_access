@@ -206,6 +206,10 @@ benefits_hh <- hh_ame[c("interview__key","ame_sum")] %>%
          consumed_seafood_gifted_pr = consumed_seafood_gifted/consumed_seafood)
 
 benefits_hh #%>% view() # 2146 hh's
+
+# save to csv for team
+#benefits_hh %>% 
+#  write_csv(here("Data","hh_local_seafood_consumption.csv"))
 ```
 
 Plots of hh_ame, proportion seafood consumed
