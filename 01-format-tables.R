@@ -131,7 +131,7 @@ ame_table <- read_csv(here("MS_access","inputs","coates_2017_table2_ame.csv")) %
   mutate(age_sex = str_c(age_category, sex, sep = "_"))
 
 # note: these age categories are based on AME stats; other age cat's are based on working age
-hh_ame <- hh%>% 
+hh_ame <- hh %>% 
   select(interview__key, respondent_id, sex, age) %>%
   mutate(age_category = case_when(age < 1 ~ "infant", 
                                   age < 5 ~ "child", 
