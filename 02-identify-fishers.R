@@ -86,9 +86,9 @@ fisher_tbl <- fishers %>%
 fisher_tbl
 
 
-# Respondents who ate fish in the last 7 days (h1503a), from home production (h1503l) ----
+# HOUSEHOLDS who ate fish in the last 7 days (h1503a), from home production (h1503l) ----
 
-# The number of respondents who ate fish in the last 7 days (h1503a), from home production (h1503l)
+# The number of HOUSEHOLDS who ate fish in the last 7 days (h1503a), from home production (h1503l)
 # Need to query 'food_recall' to get the Fish and seafood data for households.
 # where food == fish and seafood" and type == "home production"
 #' h1503' = h1503_query
