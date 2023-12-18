@@ -16,4 +16,3 @@ library(tidyverse)
 
 conflict_prefer("select", "dplyr") # (need to use raster::select for rasters)
 conflict_prefer("filter", "dplyr")
-
