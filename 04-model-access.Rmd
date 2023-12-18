@@ -44,7 +44,6 @@ source(here("MS_access", "00-load-datasets.R"))
 source(here("MS_access", "01-format-tables.R"))
 
 # load analysis table generated in 03-prep-access-vars.Rmd
-# NOTE: this file needs to be made available
 access_df <- readRDS(here("Data","access_indicators.RDS"))
 
 # RESTRICT analysis to only HH's that answered 'food recall::seafood' (n = 2125)
@@ -59,7 +58,7 @@ access_df <- access_df %>%
          a6_authority = a6_authority_score, 
          a7_identity = a7_canfish_hh_sum, # a7_canfish_hh_score
          a8_relationships = a8_gifted_seafood_hh) %>% 
-  mutate(consumed_seafood_gp = if_else(consumed_seafood_qt == "high", "high", "not_high")) %>% 
+  #mutate(consumed_seafood_gp = if_else(consumed_seafood_qt == "high", "high", "not_high")) %>% 
   mutate(hh_size = hh_size.x) %>% 
   select(-c(hh_size.x,hh_size.y))
 
@@ -77,6 +76,12 @@ varnames
 ## Checks & correlations
 ```{r}
 access_df %>% skim()
+
+# Check:
+access_df %>% 
+  filter(consumed_seafood_qt %in% c("low","high")) %>%
+  select(interview__key,consumed_seafood_qt, all_of(access_vars)) %>% 
+  skim()
 
 # Check correlations
 # Predictors and household size
@@ -115,6 +120,7 @@ Global model of high / low seafood consumption households
 Which access variables best predict high / low seafood consumption.
 
 ```{r}
+# Random forest setup 
 # 2146 -> 1058
 
 mod1_df <- access_df %>% 
@@ -176,6 +182,78 @@ mod1_rf %>% write_rds(here("MS_access","Outputs","04-mod1_rf.RDS"))
 
 ```
 
+### 1b. Variable Importance
+```{r}
+print(mod1_rf$finalModel)
+plot(mod1_rf$finalModel)
+varImpPlot(mod1_rf$finalModel)
+
+mod1_rf_imp <- mod1_rf$finalModel$importance %>% 
+  as.data.frame() %>% 
+  rownames_to_column(var = "access_var") %>% 
+  as_tibble() %>% 
+  arrange(-MeanDecreaseGini) %>% 
+  mutate(access_var = recode(access_var, 
+                             "a8_relationships1" = "a8_relationships"))
+
+mod1_rf_imp
+```
+
+
+### 1c. Variable importance check
+Check variable importance using alternate metrics. 
+Note: the model is re-produced here using the 'ranger' rather than the more robust 
+final model produced with 'caret' above. 
+
+```{r}
+set.seed(1986)
+library(ranger)
+
+rf_test1 <- ranger(consumed_seafood_qt ~ ., 
+       importance = "impurity",
+       mtry = 3,
+       num.trees = 5000, 
+       data = mod1_df) %>% 
+  importance() %>% 
+  as.list() %>% 
+  as_tibble() %>% 
+  mutate(metric = "impurity")
+
+rf_test2 <- ranger(consumed_seafood_qt ~ ., 
+       importance = "impurity_corrected",
+       mtry = 3,
+       num.trees = 5000,
+       data = mod1_df) %>% 
+  importance() %>% 
+  as.list() %>% 
+  as_tibble() %>% 
+  mutate(metric = "impurity_corrected")
+
+rf_test3 <- ranger(consumed_seafood_qt ~ ., 
+       importance = "permutation",
+       mtry = 3, 
+       num.trees = 5000,
+       data = mod1_df) %>% 
+  importance() %>% 
+  as.list() %>% 
+  as_tibble() %>% 
+  mutate(metric = "Permutation importance")
+
+
+rf_test <- bind_rows(rf_test1, rf_test2, rf_test3) %>% 
+  pivot_longer(-metric, names_to = "variable", values_to = "score") %>% 
+  bind_rows(mod1_rf_imp %>% 
+              rename(variable = access_var, score = MeanDecreaseGini) %>% 
+              mutate(metric = "Gini importance"))
+
+rf_test %>% 
+  filter(metric %in% c("Gini importance","Permutation importance")) %>% 
+  ggplot(aes(x = score, y = reorder(variable, score)))+
+  geom_bar(stat = "identity")+
+  ylab("")+xlab("importance score")+
+  facet_wrap(~metric, scales = "free_x")
+```
+
 RF Stats
 
 ```{r}
@@ -232,15 +310,6 @@ mod1_rf$finalModel$err.rate %>%
 ggsave(here("MS_access","plots","mod1_errorplot.png"), 
        height = 4, width = 8) 
 
-print(mod1_rf$finalModel)
-plot(mod1_rf$finalModel)
-varImpPlot(mod1_rf$finalModel)
-
-mod1_rf_imp <- mod1_rf$finalModel$importance %>% 
-  as.data.frame() %>% 
-  rownames_to_column(var = "access_var") %>% 
-  as_tibble() %>% 
-  arrange(-MeanDecreaseGini)
 
 mod1_rf_imp_order <- c("markets","capital", "technology",
                        "identity","labor", 
@@ -248,18 +317,17 @@ mod1_rf_imp_order <- c("markets","capital", "technology",
                        "social relationships")
 
 p1 <- mod1_rf_imp %>% 
-  mutate(access_var = recode(access_var, 
-                             "a8_relationships1" = "a8_relationships")) %>% 
   left_join(varnames) %>% 
+  mutate(varname = str_to_sentence(varname)) %>% 
   ggplot(aes(x = MeanDecreaseGini, y = reorder(varname, MeanDecreaseGini)))+
   geom_bar(stat = "identity")+
-  ylab("")+xlab("importance")+
+  ylab("")+xlab("Gini importance")+
   theme_bw()
 
 p1
 ```
 
-### 1b. Boxplots of access variables
+### 1d. Boxplots of access variables
 - (Small, horizontal) boxplots of access variables, lined up with RF results
 
 ```{r}
@@ -275,24 +343,26 @@ access_scaled
 # low seafood consumption
 p2 <- access_scaled %>% 
   filter(consumed_seafood_qt %in% c("low","high")) %>% 
-  pivot_longer(cols = all_of(access_vars), names_to = "access_var", values_to = "std_score") %>% 
-  mutate(consumed_seafood_qt = factor(consumed_seafood_qt, levels = c("low","high"))) %>% 
+  pivot_longer(cols = all_of(access_vars), names_to = "access_var", values_to = "std_score") %>%
+  mutate(consumed_seafood_qt = recode(consumed_seafood_qt, "high" = "High", "low" = "Low"), 
+         consumed_seafood_qt = factor(consumed_seafood_qt, levels = c("Low","High"))) %>%
   left_join(varnames) %>% 
-  mutate(varname = factor(varname, levels = rev(mod1_rf_imp_order))) %>% 
-  ggplot(aes(y = std_score, x = varname, colour = consumed_seafood_qt))+
-  geom_quasirandom(dodge.width = 0.8, alpha = 0.05, varwidth = T)+
+  left_join(mod1_rf_imp) %>% 
+  ggplot(aes(y = std_score, x = reorder(varname, MeanDecreaseGini), colour = consumed_seafood_qt))+
   geom_boxplot(fill = "transparent")+
+  geom_quasirandom(dodge.width = 0.8, alpha = 0.05, varwidth = T)+
   scale_colour_manual(values = cat_palette2[c(1,3)], 
-                      name = "seafood consumption category")+
-  xlab("")+ylab("standard score")+
+                      name = "Seafood consumption category")+
+  xlab("")+ylab("Standard score")+
   coord_flip()+
   theme_bw()+
   theme(axis.text.y=element_blank(),
         axis.ticks.y=element_blank())
 
+p2
 
-  
-png(here("MS_access","plots","fig3_mod1_varimp_boxplot.png"), 
+
+png(here("MS_access","plots","fig1_mod1_varimp_boxplot.png"), 
     height = 6, width = 11, res = 300,units = "in")
 
 ggpubr::ggarrange(p1, p2, labels = c("A", "B"), ncol = 2, widths = c(1.5,2), 
@@ -303,7 +373,7 @@ dev.off()
 ```
 
 
-### 1c. CART
+### 1e. CART
 One tree - used for insights into whats going on 'under the hood' in the RF models - 
 not as a result.
 
@@ -333,6 +403,7 @@ mod1b_cart
 rpart.plot(mod1b_cart$finalModel, yesno = T)
 
 ```
+
 
 # 2. Clustering analysis - High seafood consumption households
 - 534 households
@@ -365,7 +436,8 @@ hsc %>% tabyl(island_village)
 hsc_mat <- hsc %>% 
   column_to_rownames(var = "interview__key") %>% 
   select(all_of(access_vars)) %>%
-  rename_with(.fn = ~gsub("a\\d_","",.)) %>%  # remove numbers from access var labels
+  rename_with(.fn = ~gsub("a\\d_","",.)) %>% 
+  rename_with(.fn = ~str_to_sentence(.)) %>%  # remove numbers from access var labels
   as.matrix()
 
 # clusters of access vars
@@ -380,7 +452,7 @@ col_dend <- hsc_mat %>%
 
 # heatmap & clusters together
 my_cols <- colorRampPalette(c("#fff7fb","#a6bddb","#08306b"))(9)
-hsc_heatmap <- Heatmap(t(hsc_mat), name = "standard score", 
+hsc_heatmap <- Heatmap(t(hsc_mat), name = "Standard score", 
         #col = brewer.pal(9, "BuPu"),
         col = my_cols,
         row_names_gp = gpar(fontsize = 8),
@@ -402,13 +474,9 @@ dev.off()
 
 ```
 ## Number of clusters
-- According to the majority rule, the best number of clusters is  3 (followed by 5, 10/2)
-
-Charrad et al. 2014 (NbClust Package)
-The user faces the dilemma of choosing one among several available solutions.There are two ways to deal with this problem. 
-
-- The first one is based on the majority rule, which is available in the NbClust package. The optimal number of clusters would be 4, as it is selected by 20 indices among 30, which is the correct number of clusters. 
-- The second option consists in considering only indices that performed best in simulation studies. For example, the 5 top performers in the Milligan and Cooper (1985) study are CH index, Duda index, Cindex, Gamma and Beale.
+- According to the majority rule, the best number of clusters is  3
+- Validity of 'majority rule' is contested.
+- Relying on commonly used and notably robust metrics
 
 ```{r}
 library(factoextra)
@@ -480,13 +548,14 @@ hsc_clust %>%
   rename_with(.fn = ~gsub("a\\d_","",.)) %>%  # remove numbers from access var labels  
   pivot_longer(cols = -c(interview__key, cluster), names_to = "access_var") %>% 
   mutate(access_var = factor(access_var, levels = c("technology","labor","knowledge","relationships", 
-                                                       "capital","markets","authority","identity"))) %>% 
+                                                       "capital","markets","authority","identity")), 
+         access_var = str_to_sentence(access_var)) %>% 
   ggplot(aes(x = cluster, y = value, colour = cluster))+
   geom_boxplot(fill = "gray80", color = "gray20", size = 0.2, outlier.alpha = 0)+
   geom_jitter(alpha = 0.2, size = .8, width = 0.2, height = 0)+
   facet_wrap(~access_var, nrow=1)+
   theme_bw()+
-  theme(legend.position = "none")+xlab("cluster")+ylab("standard score")
+  theme(legend.position = "none")+xlab("Cluster")+ylab("Standard score")
 
 ggsave(here("MS_access","plots","mod1_cluster_boxplot_alt.png"), height = 3, width = 9)
 
@@ -864,10 +933,10 @@ clust_seafood %>%
   ggplot(aes(x = cluster, y = qty_grams_lim, colour = cluster))+
   geom_boxplot()+
   geom_point(aes(y = max_qty), color = "gray60")+
-  geom_hline(yintercept = 75e+3, lty = 3, lwd = 0.1)+
+  geom_hline(yintercept = 75e+3, lty = 3, lwd = 0.3)+
   #scale_x_discrete(label = function(x) stringr::str_trunc(x, 3, ellipsis = "")) +  
   facet_wrap(~coicop_id, nrow = 3)+
-  ylab("quantity (grams)")+
+  ylab("Quantity (grams)")+xlab("Cluster")+
   theme_bw()+
   theme(strip.text= element_text(size = 7),
         legend.position = "none")
@@ -896,7 +965,7 @@ h1503 %>%
 
 ```
 
-## Teeraina:
+## Teeraina
 - Are they eating mostly imported seafood? 
 - Lots of home production. What are they eating?
 
@@ -1258,15 +1327,15 @@ kir1_bathy_sf <- as.SpatialGridDataFrame(kir1_bathy) %>%
 kir1_bathy_rast <- stars::st_rasterize(kir1_bathy_sf) %>% 
     as.data.frame(depth_m, xy = TRUE)
 #test
-ggplot()+
-  geom_raster(data = kir1_bathy_rast, aes(x = x, y = y, fill = depth_m))
+#ggplot()+
+#  geom_raster(data = kir1_bathy_rast, aes(x = x, y = y, fill = depth_m))
 
 # Alt (contour plot)
 kir1_bathy_contour <- stars::st_rasterize(kir1_bathy_sf) %>% 
    stars::st_contour()
 
-ggplot()+
-   geom_sf(data = kir1_bathy_contour)
+#ggplot()+
+#   geom_sf(data = kir1_bathy_contour)
 
 kir2_bathy <- getNOAA.bathy(lon1 = bbox2[1]-1, lon2 = bbox2[3]+1, 
                             lat1 = bbox2[2]-1, lat2 = 6, resolution = 1)
@@ -1290,8 +1359,9 @@ map1 <- vlg_sf %>%
   filter(region == "gilbert_islands") %>% 
   ggplot()+
   geom_raster(data = kir1_bathy_rast, aes(x = x, y = y, fill = depth_m))+
-  geom_sf(data = kir1_bathy_contour, fill = 'transparent', lwd = 1e-20, color = "grey20")+
-  geom_sf(data = world, color = "gray30",fill = "gray30", lwd = 300)+  
+  scale_fill_gradient(name = "Depth (m)")+
+  geom_sf(data = kir1_bathy_contour, fill = 'transparent', lwd = .1, color = "grey20")+
+  geom_sf(data = kir1, color = "gray30",fill = "gray30", lwd = 2)+  
   geom_sf(size = 2.2, lwd = 0.05, color = "black", shape = 19, alpha = 1)+
   geom_sf(aes(colour = population_2020), size = 2,
           shape = 19, alpha = 0.8)+
@@ -1308,8 +1378,9 @@ map2 <- vlg_sf %>%
   filter(region == "line_islands") %>% 
   ggplot()+
   geom_raster(data = kir2_bathy_rast, aes(x = x, y = y, fill = depth_m))+
-  geom_sf(data = kir2_bathy_contour, fill = 'transparent', lwd = 1e-20, color = "grey20")+
-  geom_sf(data = world, color = "gray30",fill = "gray30", lwd = 200)+
+  scale_fill_gradient(name = "Depth (m)")+
+  geom_sf(data = kir2_bathy_contour, fill = 'transparent', lwd = .1, color = "grey20")+
+  geom_sf(data = kir2, color = "gray30",fill = "gray30", lwd = 1)+
   geom_sf(size = 2.2, lwd = 0.05, color = "black", shape = 19, alpha = 1)+
   geom_sf(aes(colour = population_2020), size = 2, lwd = 0.05, 
           shape = 19, alpha = 0.8)+
@@ -1322,7 +1393,7 @@ map2 <- vlg_sf %>%
   scale_y_continuous(limits = c(1, 6), expand = c(0,0))+
   theme_classic()+xlab("")+ylab("")
 
-png(here("MS_access","plots","fig1_map.png"), 
+png(here("MS_access","plots","Fig3_map.png"), 
     height = 6, width = 10, res = 600,units = "in")
 
 ggpubr::ggarrange(map1, map2, labels = c("A", "B"), ncol = 2, widths = c(1,1),
