@@ -2,7 +2,7 @@
 
 This repository contains the code used to produce the analysis and figures in: 
 
-Seto, Katherine L., Whitney R. Friedman, Jacob G. Eurich, Jessica A. Gephart, Jessica Zamborain-Mason, Michael Sharp, Erietera Aram, Aritita Tekaieti, Aranteiti Tekiau, and Christopher D. Golden. 2023. “Characterizing Pathways of Seafood Access in Small Island Developing States.” Proceedings of the National Academy of Sciences.
+Seto, Katherine L., Whitney R. Friedman, Jacob G. Eurich, Jessica A. Gephart, Jessica Zamborain-Mason, Michael Sharp, Erietera Aram, Aritita Tekaieti, Aranteiti Tekiau, and Christopher D. Golden. 2023. “Characterizing Pathways of Seafood Access in Small Island Developing States.” Proceedings of the National Academy of Sciences. 121(7):e2305424121. https://doi.org/10.1073/pnas.2305424121
 
 # Abstract
 
